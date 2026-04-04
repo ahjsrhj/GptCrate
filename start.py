@@ -111,7 +111,7 @@ HOTMAIL007_MAIL_MODE=imap
         f.write(env_content)
 
 def run_gpt(count, threads):
-    cmd = ["python", "gpt.py"]
+    cmd = ["gpt.py"]
     
     if count:
         cmd.extend(["--count", str(count)])
@@ -119,11 +119,14 @@ def run_gpt(count, threads):
     if threads > 1:
         cmd.extend(["--threads", str(threads)])
     
+    cmd.append("--proxy-file")
+    cmd.append("proxies.txt")
+    
     print("\n" + "=" * 50)
     print("开始运行 OpenAI 注册工具...")
     print("=" * 50 + "\n")
     
-    os.execv(sys.executable, [sys.executable] + cmd + ["--proxy-file", "proxies.txt"])
+    os.execv(sys.executable, [sys.executable] + cmd)
 
 def main():
     print_banner()
