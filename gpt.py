@@ -893,10 +893,45 @@ def luckmail_get_purchased_emails(proxies: Any = None, page: int = 1, page_size:
 
         if data.get("code") == 0:
             mails = data.get("data", {}).get("list", [])
-            return mails, None
-        return [], data.get("message", "获取已购邮箱失败")
+            total = data.get("data", {}).get("total", 0)
+            return mails, None, total
+        return [], data.get("message", "获取已购邮箱失败"), 0
     except Exception as e:
-        return [], f"获取已购邮箱异常: {e}"
+        return [], f"获取已购邮箱异常: {e}", 0
+
+
+def luckmail_get_all_purchased_emails(proxies: Any = None, user_disabled: int = 0) -> tuple:
+    """获取所有已购邮箱（自动分页）
+    user_disabled: 0=正常(非禁用), 1=已禁用
+    返回: (邮箱列表, 错误信息)
+    """
+    all_mails = []
+    page = 1
+    page_size = 50
+
+    while True:
+        mails, err, total = luckmail_get_purchased_emails(
+            proxies=proxies, page=page, page_size=page_size, user_disabled=user_disabled
+        )
+        if err:
+            return all_mails, err
+
+        if not mails:
+            break
+
+        all_mails.extend(mails)
+
+        # 如果已经获取完所有邮箱，退出循环
+        if len(all_mails) >= total:
+            break
+
+        # 如果本次获取的数量少于page_size，说明已经是最后一页
+        if len(mails) < page_size:
+            break
+
+        page += 1
+
+    return all_mails, None
 
 
 def luckmail_check_purchased_emails(proxies: Any = None, max_workers: int = 5) -> list:
@@ -904,7 +939,7 @@ def luckmail_check_purchased_emails(proxies: Any = None, max_workers: int = 5) -
     只检查非禁用的邮箱，不活跃的自动禁用
     """
     print(f"[*] 获取已购邮箱列表...")
-    mails, err = luckmail_get_purchased_emails(proxies=proxies, user_disabled=0)
+    mails, err = luckmail_get_all_purchased_emails(proxies=proxies, user_disabled=0)
     if err:
         print(f"[Error] 获取已购邮箱失败: {err}")
         return []
@@ -2268,7 +2303,7 @@ def _disable_email_on_failure(email: str, tag: str = "") -> None:
     else:
         # 如果本地没有凭据，尝试从已购邮箱列表中查找
         try:
-            mails, err = luckmail_get_purchased_emails(user_disabled=0)
+            mails, err = luckmail_get_all_purchased_emails(user_disabled=0)
             if not err and mails:
                 for mail in mails:
                     if mail.get("email_address") == email:
