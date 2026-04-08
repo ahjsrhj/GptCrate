@@ -188,6 +188,11 @@ class LocalOutlookAccountQueue:
             self._save_unlocked()
             return account
 
+    def push_front(self, account: dict) -> None:
+        with self._lock:
+            self._accounts.insert(0, account)
+            self._save_unlocked()
+
     def _save_unlocked(self) -> None:
         try:
             with open(self._filepath, "w", encoding="utf-8") as f:

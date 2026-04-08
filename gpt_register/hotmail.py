@@ -42,6 +42,40 @@ def _record_local_outlook_bad_account(account: dict, reason: str) -> None:
     print(f"[*] 已记录坏号到 {bad_file}: {account.get('email')} ({reason_text[:120]})")
 
 
+def _should_record_local_outlook_bad_account(reason: str) -> bool:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    transient_markers = [
+        "could not resolve host",
+        "failed to perform",
+        "timed out",
+        "timeout",
+        "proxy",
+        "connection reset",
+        "connection refused",
+        "temporarily unavailable",
+        "network is unreachable",
+        "ssl",
+        "tls",
+    ]
+    if any(marker in text for marker in transient_markers):
+        return False
+    bad_markers = [
+        "invalid_grant",
+        "invalid_client",
+        "unauthorized_client",
+        "invalid refresh token",
+        "token_error:",
+        "账号被封禁",
+        "service abuse",
+        "consent_required",
+        "interaction_required",
+        "imap 所有方法均失败",
+    ]
+    return any(marker in text for marker in bad_markers)
+
+
 def _set_mail_error(email_addr: str, reason: str | None) -> None:
     creds = ctx._hotmail007_credentials.get(email_addr)
     if creds is None:
@@ -478,8 +512,14 @@ def get_local_email_and_token(proxies: Any = None) -> tuple:
             else:
                 _outlook_get_graph_token(account["client_id"], account["refresh_token"], proxies)
         except Exception as exc:
-            _record_local_outlook_bad_account(account, f"{mode}_precheck_failed:{exc}")
-            continue
+            reason = f"{mode}_precheck_failed:{exc}"
+            if _should_record_local_outlook_bad_account(reason):
+                _record_local_outlook_bad_account(account, reason)
+                continue
+            if hasattr(ctx._email_queue, "push_front"):
+                ctx._email_queue.push_front(account)
+            print(f"[Warning] 本地 Outlook 预检遇到瞬时错误，账号已放回队列: {email} ({str(exc)[:120]})")
+            return "", ""
 
         ctx._hotmail007_credentials[email] = {
             "client_id": account["client_id"],
@@ -512,7 +552,7 @@ def get_oai_code(email: str, proxies: Any = None) -> str:
     )
     if not code and creds.get("source") == "local_outlook":
         last_error = str(creds.get("last_mail_error") or "").strip()
-        if last_error and last_error != "otp_timeout":
+        if _should_record_local_outlook_bad_account(last_error):
             account_line = str(creds.get("account_line") or "").strip()
             if account_line:
                 parts = account_line.split("----", 3)

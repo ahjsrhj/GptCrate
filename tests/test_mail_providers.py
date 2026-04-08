@@ -155,6 +155,48 @@ class MailProviderTests(unittest.TestCase):
                 bad_content = handle.read()
             self.assertIn("bad@example.com----bad-pass----bad-client----bad-refresh", bad_content)
 
+    def test_local_outlook_transient_precheck_error_is_not_recorded_and_requeued(self):
+        import os
+        import tempfile
+
+        ctx.EMAIL_MODE = "local_outlook"
+        ctx.LOCAL_OUTLOOK_MAIL_MODE = "graph"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bad_file = os.path.join(temp_dir, "bad.txt")
+            ctx.LOCAL_OUTLOOK_BAD_FILE = bad_file
+
+            class FakeQueue:
+                def __init__(self):
+                    self.items = [
+                        {
+                            "email": "temp@example.com",
+                            "password": "temp-pass",
+                            "client_id": "temp-client",
+                            "refresh_token": "temp-refresh",
+                        }
+                    ]
+
+                def __len__(self):
+                    return len(self.items)
+
+                def pop(self):
+                    return self.items.pop(0) if self.items else None
+
+                def push_front(self, account):
+                    self.items.insert(0, account)
+
+            queue = FakeQueue()
+            ctx._email_queue = queue
+
+            with mock.patch.object(hotmail, "_outlook_get_graph_token", side_effect=Exception("Could not resolve host: login.microsoftonline.com")):
+                email, token = mail.get_email_and_token()
+
+            self.assertEqual((email, token), ("", ""))
+            self.assertEqual(len(queue.items), 1)
+            self.assertEqual(queue.items[0]["email"], "temp@example.com")
+            self.assertFalse(os.path.exists(bad_file))
+
     def test_local_outlook_uses_imap_mode_when_configured(self):
         ctx.EMAIL_MODE = "local_outlook"
         ctx.LOCAL_OUTLOOK_MAIL_MODE = "imap"
