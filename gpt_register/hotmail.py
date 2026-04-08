@@ -491,7 +491,6 @@ def get_email_and_token(proxies: Any = None) -> tuple:
         err_text = str(err or "").strip().lower()
         if err_text == "buy error":
             print(f"[*] Hotmail007 购买邮箱暂时失败，继续重试 (第 {attempt} 次)...")
-            time.sleep(2)
             continue
         if attempt >= max_retry:
             return "", ""
