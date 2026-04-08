@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import cpa2sub
+from gpt_register import sub_format as cpa2sub
 
 
 def make_jwt(payload: dict) -> str:

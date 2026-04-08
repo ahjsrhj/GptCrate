@@ -8,10 +8,9 @@ import time
 from datetime import datetime
 from typing import Optional
 
-import cpa2sub
-
 from . import context as ctx
 from . import mail, oauth, register
+from . import sub_format
 
 
 _ANSI_RESET = "\033[0m"
@@ -165,8 +164,8 @@ def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> No
 
     if t_data:
         try:
-            sub_account = cpa2sub.convert_current_token_to_sub(t_data, index=1)
-            sub_export = cpa2sub.build_export([sub_account])
+            sub_account = sub_format.convert_current_token_to_sub(t_data, index=1)
+            sub_export = sub_format.build_export([sub_account])
             with ctx._file_write_lock:
                 with open(sub_file_name, "w", encoding="utf-8") as sf:
                     json.dump(sub_export, sf, ensure_ascii=False, indent=2)
