@@ -1,6 +1,10 @@
 import os
+import random
+import string
 import threading
 import time
+import urllib.parse
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 
@@ -33,6 +37,11 @@ MAIL_WORKER_BASE = os.getenv("MAIL_WORKER_BASE", "").rstrip("/")
 MAIL_ADMIN_PASSWORD = os.getenv("MAIL_ADMIN_PASSWORD", "")
 TOKEN_OUTPUT_DIR = (os.getenv("TOKEN_OUTPUT_DIR") or "./tokens").strip()
 CLI_PROXY_AUTHS_DIR = os.getenv("CLI_PROXY_AUTHS_DIR", "").strip()
+CODEX2API_BASE_URL = os.getenv("CODEX2API_BASE_URL", "").strip().rstrip("/")
+CODEX2API_ADMIN_SECRET = os.getenv("CODEX2API_ADMIN_SECRET", "").strip()
+
+RESIN_URL = os.getenv("RESIN_URL", "").strip()
+RESIN_PLATFORM_NAME = os.getenv("RESIN_PLATFORM_NAME", "").strip()
 
 PROXY_FILE = os.getenv("PROXY_FILE", "").strip()
 SINGLE_PROXY = os.getenv("PROXY", "").strip()
@@ -70,6 +79,137 @@ except ValueError:
 
 ACCOUNTS_FILE = os.getenv("ACCOUNTS_FILE", "accounts.txt").strip()
 AUTO_REGISTER_THRESHOLD = 10
+
+
+def is_resin_enabled() -> bool:
+    return bool(RESIN_URL and RESIN_PLATFORM_NAME)
+
+
+def parse_resin_url(resin_url: Optional[str] = None) -> dict:
+    raw = (resin_url if resin_url is not None else RESIN_URL).strip()
+    if not raw:
+        raise ValueError("RESIN_URL 未配置")
+
+    parsed = urllib.parse.urlsplit(raw)
+    token = parsed.path.lstrip("/")
+    if not parsed.scheme:
+        raise ValueError("RESIN_URL 缺少协议头")
+    if not parsed.hostname:
+        raise ValueError("RESIN_URL 缺少主机地址")
+    if not token:
+        raise ValueError("RESIN_URL 缺少 Token 路径")
+    if "/" in token:
+        raise ValueError("RESIN_URL Token 路径格式不正确")
+
+    return {
+        "scheme": parsed.scheme,
+        "host": parsed.hostname,
+        "port": parsed.port,
+        "token": token,
+    }
+
+
+def compose_resin_proxy_url(
+    platform: str,
+    account: str,
+    token: str,
+    host: str,
+    port: Optional[int] = None,
+    scheme: str = "http",
+) -> str:
+    platform_name = str(platform or "").strip()
+    account_name = str(account or "").strip()
+    token_value = str(token or "").strip()
+    host_name = str(host or "").strip()
+    scheme_name = str(scheme or "").strip()
+
+    if not platform_name:
+        raise ValueError("RESIN_PLATFORM_NAME 未配置")
+    if not account_name:
+        raise ValueError("Resin Account 不能为空")
+    if not token_value:
+        raise ValueError("RESIN_URL 中未包含有效 Token")
+    if not host_name:
+        raise ValueError("RESIN_URL 中未包含有效主机地址")
+    if not scheme_name:
+        raise ValueError("RESIN_URL 中未包含有效协议")
+
+    username = urllib.parse.quote(f"{platform_name}.{account_name}", safe=".")
+    password = urllib.parse.quote(token_value, safe="")
+    host_display = host_name
+    if ":" in host_name and not host_name.startswith("["):
+        host_display = f"[{host_name}]"
+    port_part = f":{port}" if port is not None else ""
+    return f"{scheme_name}://{username}:{password}@{host_display}{port_part}"
+
+
+def _generate_resin_account(length: int = 6) -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(random.choices(alphabet, k=length))
+
+
+@dataclass
+class ResinRunState:
+    startup_account: str = ""
+    current_account: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.startup_account:
+            self.get_resin_startup_account(force_new=True)
+        elif not self.current_account:
+            self.current_account = self.startup_account
+
+    def get_resin_startup_account(self, force_new: bool = False) -> str:
+        if force_new or not self.startup_account:
+            self.startup_account = _generate_resin_account()
+            self.current_account = self.startup_account
+        elif not self.current_account:
+            self.current_account = self.startup_account
+        return self.startup_account
+
+    def set_current_account(self, account: Optional[str]) -> str:
+        account_value = str(account or "").strip()
+        if not account_value:
+            return self.get_resin_startup_account()
+        self.current_account = account_value
+        return self.current_account
+
+
+def get_resin_startup_account(
+    force_new: bool = False,
+    *,
+    resin_state: Optional[ResinRunState] = None,
+) -> str:
+    state = resin_state or ResinRunState()
+    return state.get_resin_startup_account(force_new=force_new)
+
+
+def build_proxy_url(
+    proxy: Optional[str],
+    *,
+    account: Optional[str] = None,
+    resin_state: Optional[ResinRunState] = None,
+) -> Optional[str]:
+    if proxy:
+        return proxy
+    if not is_resin_enabled():
+        return None
+
+    state = resin_state or ResinRunState()
+    if account is not None and str(account).strip():
+        account_value = state.set_current_account(account)
+    else:
+        account_value = state.current_account or state.get_resin_startup_account()
+
+    resin_config = parse_resin_url()
+    return compose_resin_proxy_url(
+        RESIN_PLATFORM_NAME,
+        account_value,
+        resin_config["token"],
+        resin_config["host"],
+        resin_config["port"],
+        resin_config["scheme"],
+    )
 
 
 
@@ -387,5 +527,11 @@ def _skip_net_check() -> bool:
 
 
 
-def build_proxies(proxy: Optional[str]):
-    return {"http": proxy, "https": proxy} if proxy else None
+def build_proxies(
+    proxy: Optional[str],
+    *,
+    account: Optional[str] = None,
+    resin_state: Optional[ResinRunState] = None,
+):
+    proxy_url = build_proxy_url(proxy, account=account, resin_state=resin_state)
+    return {"http": proxy_url, "https": proxy_url} if proxy_url else None

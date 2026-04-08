@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 import time
 import urllib.parse
@@ -9,10 +11,26 @@ from . import context as ctx
 from .cf_mail import extract_otp_code
 from .ui import rich_print as print
 
+_TIMEOUT_RETRY_LIMIT = 3
+
 
 def _resolve_outlook_mail_mode(preferred: str | None = None) -> str:
     mode = (preferred or "graph").strip().lower()
     return mode if mode in {"graph", "imap"} else "graph"
+
+
+def _is_timeout_error(error: Any) -> bool:
+    text = str(error or "").strip().lower()
+    if not text:
+        return False
+    timeout_markers = [
+        "timed out",
+        "timeout",
+        "curl: (28)",
+        "operation timed out",
+        "connection timed out",
+    ]
+    return any(marker in text for marker in timeout_markers)
 
 
 def _local_outlook_account_to_line(account: dict) -> str:
@@ -482,6 +500,7 @@ def get_email_and_token(proxies: Any = None) -> tuple:
     mails = []
     err = ""
     attempt = 0
+    timeout_retry = 0
     while True:
         attempt += 1
         mails, err = hotmail007_get_mail(quantity=1, proxies=proxies)
@@ -489,8 +508,17 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             break
         print(f"[Error] Hotmail007 拉取邮箱失败: {err}")
         err_text = str(err or "").strip().lower()
+        if _is_timeout_error(err):
+            timeout_retry += 1
+            if timeout_retry > _TIMEOUT_RETRY_LIMIT:
+                return "", ""
+            print(f"[*] Hotmail007 拉取邮箱请求超时，继续重试 ({timeout_retry}/{_TIMEOUT_RETRY_LIMIT})...")
+            time.sleep(2)
+            continue
+        timeout_retry = 0
         if err_text == "buy error":
             print(f"[*] Hotmail007 购买邮箱暂时失败，继续重试 (第 {attempt} 次)...")
+            time.sleep(2)
             continue
         if attempt >= max_retry:
             return "", ""

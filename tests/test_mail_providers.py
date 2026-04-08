@@ -132,6 +132,59 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual(get_mail_mock.call_count, 4)
         self.assertEqual(sleep_mock.call_count, 3)
 
+    def test_hotmail007_timeout_retries_three_times_before_success(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        fake_mail = {
+            "email": "timeout-retry@example.com",
+            "password": "secret",
+            "refresh_token": "refresh",
+            "client_id": "client",
+        }
+        timeout_error = "Failed to perform, curl: (28) Connection timed out after 15001 milliseconds."
+
+        with mock.patch.object(
+            hotmail,
+            "hotmail007_get_mail",
+            side_effect=[
+                ([], timeout_error),
+                ([], timeout_error),
+                ([], timeout_error),
+                ([fake_mail], ""),
+            ],
+        ) as get_mail_mock, \
+            mock.patch.object(hotmail, "_outlook_get_known_ids", return_value=set()), \
+            mock.patch("gpt_register.hotmail.time.sleep") as sleep_mock:
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), ("timeout-retry@example.com", "timeout-retry@example.com"))
+        self.assertEqual(get_mail_mock.call_count, 4)
+        self.assertEqual(sleep_mock.call_count, 3)
+
+    def test_hotmail007_timeout_fails_after_three_retries(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        timeout_error = "Failed to perform, curl: (28) Operation timed out after 15002 milliseconds with 0 bytes received."
+
+        with mock.patch.object(
+            hotmail,
+            "hotmail007_get_mail",
+            side_effect=[
+                ([], timeout_error),
+                ([], timeout_error),
+                ([], timeout_error),
+                ([], timeout_error),
+            ],
+        ) as get_mail_mock, \
+            mock.patch("gpt_register.hotmail.time.sleep") as sleep_mock:
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), ("", ""))
+        self.assertEqual(get_mail_mock.call_count, 4)
+        self.assertEqual(sleep_mock.call_count, 3)
+
     def test_get_email_and_token_dispatches_to_local_outlook_mode(self):
         ctx.EMAIL_MODE = "local_outlook"
         ctx.LOCAL_OUTLOOK_MAIL_MODE = "graph"

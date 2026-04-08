@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import random
 import re
@@ -5,7 +7,7 @@ import string
 import time
 import urllib.parse
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from curl_cffi import requests
 
@@ -26,6 +28,214 @@ _LAST_NAMES = [
     "Davis", "Rodriguez", "Martinez", "Wilson", "Anderson", "Taylor",
     "Thomas", "Moore", "Jackson", "Martin", "Lee", "Harris", "Clark",
 ]
+_TRANSIENT_RETRY_LIMIT = 3
+_INITIAL_DEVICE_ID_RETRY_LIMIT = 1
+_INITIAL_PROXY_REFRESH_LIMIT = 3
+
+
+def _is_timeout_error(error: Any) -> bool:
+    text = str(error or "").strip().lower()
+    if not text:
+        return False
+    timeout_markers = [
+        "timed out",
+        "timeout",
+        "curl: (28)",
+        "operation timed out",
+        "connection timed out",
+    ]
+    return any(marker in text for marker in timeout_markers)
+
+
+def _call_with_timeout_retry(action, *, label: str):
+    last_error: Exception | None = None
+    for retry_count in range(_TRANSIENT_RETRY_LIMIT + 1):
+        try:
+            return action()
+        except Exception as exc:
+            last_error = exc
+            if not _is_timeout_error(exc) or retry_count >= _TRANSIENT_RETRY_LIMIT:
+                raise
+            print(f"[*] {label} 超时，继续重试 ({retry_count + 1}/{_TRANSIENT_RETRY_LIMIT})...")
+            time.sleep(2)
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"{label} 失败")
+
+
+def _new_session(proxies: Any = None) -> requests.Session:
+    return requests.Session(proxies=proxies, impersonate="safari")
+
+
+def _check_network_ready(session: requests.Session, proxies: Any = None) -> bool:
+    if ctx._skip_net_check():
+        return True
+    try:
+        trace = _call_with_timeout_retry(
+            lambda: session.get(
+                "https://cloudflare.com/cdn-cgi/trace",
+                proxies=proxies,
+                verify=ctx._ssl_verify(),
+                timeout=10,
+            ),
+            label="网络连接检查",
+        ).text
+        loc_re = re.search(r"^loc=(.+)$", trace, re.MULTILINE)
+        loc = loc_re.group(1) if loc_re else None
+        print(f"[*] 当前 IP 所在地: {loc}")
+        if loc == "CN" or loc == "HK":
+            raise RuntimeError("检查代理哦w - 所在地不支持")
+        return True
+    except Exception as exc:
+        print(f"[Error] 网络连接检查失败: {exc}")
+        return False
+
+
+def _bootstrap_authorize_continue_detailed(
+    session: requests.Session,
+    auth_url: str,
+    proxies: Any = None,
+    *,
+    device_label: str = "Device ID",
+    device_id_retry_limit: int = _TRANSIENT_RETRY_LIMIT,
+    log_missing_device_error: bool = True,
+) -> tuple[str, str, str]:
+    device_retry_count = 0
+    sentinel_retry_count = 0
+
+    while True:
+        _call_with_timeout_retry(
+            lambda: session.get(
+                auth_url,
+                proxies=proxies,
+                verify=True,
+                timeout=15,
+            ),
+            label="拉起授权页",
+        )
+        did = session.cookies.get("oai-did")
+        print(f"[*] {device_label}: {did}")
+        if not did:
+            if device_retry_count >= device_id_retry_limit:
+                if log_missing_device_error:
+                    print("[Error] 未获取到 Device ID")
+                return "", "", "missing_device_id"
+            device_retry_count += 1
+            retry_total = max(device_id_retry_limit, 1)
+            print(f"[*] Device ID 为空，重新初始化授权页 ({device_retry_count}/{retry_total})...")
+            time.sleep(2)
+            continue
+
+        sen_req_body = f'{{"p":"","id":"{did}","flow":"authorize_continue"}}'
+        sen_resp = _call_with_timeout_retry(
+            lambda: requests.post(
+                "https://sentinel.openai.com/backend-api/sentinel/req",
+                headers={
+                    "origin": "https://sentinel.openai.com",
+                    "referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
+                    "content-type": "text/plain;charset=UTF-8",
+                },
+                data=sen_req_body,
+                proxies=proxies,
+                impersonate="safari",
+                verify=ctx._ssl_verify(),
+                timeout=15,
+            ),
+            label="Sentinel 请求",
+        )
+        if sen_resp.status_code == 200:
+            token = sen_resp.json().get("token", "")
+            if token:
+                sentinel = f'{{"p": "", "t": "", "c": "{token}", "id": "{did}", "flow": "authorize_continue"}}'
+                return did, sentinel, ""
+            print("[Error] Sentinel 响应缺少 token")
+            return "", "", "missing_sentinel_token"
+        if sen_resp.status_code == 403:
+            if sentinel_retry_count >= _TRANSIENT_RETRY_LIMIT:
+                print(f"[Error] Sentinel 异常拦截，状态码: {sen_resp.status_code}")
+                return "", "", "sentinel_403"
+            sentinel_retry_count += 1
+            print(f"[*] Sentinel 403，继续重试 ({sentinel_retry_count}/{_TRANSIENT_RETRY_LIMIT})...")
+            time.sleep(2)
+            continue
+        print(f"[Error] Sentinel 异常拦截，状态码: {sen_resp.status_code}")
+        return "", "", f"sentinel_{sen_resp.status_code}"
+
+
+def _bootstrap_authorize_continue(
+    session: requests.Session,
+    auth_url: str,
+    proxies: Any = None,
+    *,
+    device_label: str = "Device ID",
+) -> tuple[str, str]:
+    did, sentinel, _ = _bootstrap_authorize_continue_detailed(
+        session,
+        auth_url,
+        proxies=proxies,
+        device_label=device_label,
+    )
+    return did, sentinel
+
+
+def _bootstrap_initial_device_with_proxy_refresh(
+    auth_url: str,
+    proxy: Optional[str],
+    get_next_proxy: Optional[Callable[[], Optional[str]]] = None,
+    resin_state: Optional[ctx.ResinRunState] = None,
+) -> tuple[requests.Session, Optional[str], Any, str, str]:
+    current_proxy = proxy
+    proxies = ctx.build_proxies(current_proxy, resin_state=resin_state)
+    session = _new_session(proxies=proxies)
+    proxy_refresh_count = 0
+
+    while True:
+        if not _check_network_ready(session, proxies=proxies):
+            return session, current_proxy, proxies, "", ""
+
+        did, sentinel, reason = _bootstrap_authorize_continue_detailed(
+            session,
+            auth_url,
+            proxies=proxies,
+            device_id_retry_limit=_INITIAL_DEVICE_ID_RETRY_LIMIT,
+            log_missing_device_error=False,
+        )
+        if did and sentinel:
+            return session, current_proxy, proxies, did, sentinel
+
+        if reason != "missing_device_id":
+            return session, current_proxy, proxies, "", ""
+
+        if proxy_refresh_count >= _INITIAL_PROXY_REFRESH_LIMIT:
+            print("[Error] 未获取到 Device ID")
+            return session, current_proxy, proxies, "", ""
+
+        if resin_state is not None and ctx.is_resin_enabled() and not current_proxy:
+            proxy_refresh_count += 1
+            print(f"[*] 获取 Device ID 失败，重新生成 Resin 启动账号 ({proxy_refresh_count}/{_INITIAL_PROXY_REFRESH_LIMIT})...")
+            new_account = ctx.get_resin_startup_account(force_new=True, resin_state=resin_state)
+            proxies = ctx.build_proxies(current_proxy, resin_state=resin_state)
+            session = _new_session(proxies=proxies)
+            print(f"[*] 已切换 Resin 启动账号: {new_account}")
+            print(f"[*] 已切换新代理: {ctx.build_proxy_url(current_proxy, resin_state=resin_state) or '直连'}")
+            continue
+
+        if not get_next_proxy:
+            print("[Error] 未获取到 Device ID")
+            return session, current_proxy, proxies, "", ""
+
+        next_proxy = get_next_proxy()
+        if next_proxy == current_proxy:
+            print("[*] 代理池没有可切换的新代理，停止重新获取代理")
+            print("[Error] 未获取到 Device ID")
+            return session, current_proxy, proxies, "", ""
+
+        proxy_refresh_count += 1
+        print(f"[*] 获取 Device ID 失败，重新获取代理 ({proxy_refresh_count}/{_INITIAL_PROXY_REFRESH_LIMIT})...")
+        current_proxy = next_proxy
+        proxies = ctx.build_proxies(current_proxy, resin_state=resin_state)
+        session = _new_session(proxies=proxies)
+        print(f"[*] 已切换新代理: {ctx.build_proxy_url(current_proxy, resin_state=resin_state) or '直连'}")
 
 
 def _is_phone_challenge_response(payload: dict) -> bool:
@@ -53,116 +263,98 @@ def _generate_password(length: int = 16) -> str:
     random.shuffle(chars)
     return "".join(chars)
 
-def run(proxy: Optional[str]) -> tuple:
-    """运行注册流程，返回 (token_json, password, email, fail_reason)
-    失败时返回 (None/特殊标记, None, email, fail_reason)
+def run(proxy: Optional[str], get_next_proxy: Optional[Callable[[], Optional[str]]] = None) -> tuple:
+    """运行注册流程，返回 (token_json, password, email, fail_reason, used_proxy)
+    失败时返回 (None/特殊标记, None, email, fail_reason, used_proxy)
     fail_reason: 403_forbidden, signup_form_error, password_error, otp_timeout,
                  account_create_error, callback_error, network_error, other_error
     """
-    proxies: Any = ctx.build_proxies(proxy)
+    current_proxy = proxy
+    resin_state = ctx.ResinRunState() if ctx.is_resin_enabled() and not current_proxy else None
 
-    s = requests.Session(proxies=proxies, impersonate="safari")
-
-    if not ctx._skip_net_check():
-        try:
-            trace = s.get(
-                "https://cloudflare.com/cdn-cgi/trace",
-                proxies=proxies,
-                verify=ctx._ssl_verify(),
-                timeout=10,
-            )
-            trace = trace.text
-            loc_re = re.search(r"^loc=(.+)$", trace, re.MULTILINE)
-            loc = loc_re.group(1) if loc_re else None
-            print(f"[*] 当前 IP 所在地: {loc}")
-            if loc == "CN" or loc == "HK":
-                raise RuntimeError("检查代理哦w - 所在地不支持")
-        except Exception as e:
-            print(f"[Error] 网络连接检查失败: {e}")
-            return None, None, None, "network_error"
-
-    email, dev_token = mail.get_email_and_token(proxies)
+    provider_proxies: Any = ctx.build_proxies(current_proxy, resin_state=resin_state)
+    email, dev_token = mail.get_email_and_token(provider_proxies)
     if not email or not dev_token:
-        return None, None, email, "other_error"
+        return None, None, email, "other_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
     print(f"[*] 成功获取临时邮箱与授权: {email}")
     masked = dev_token[:8] + "..." if dev_token else ""
     print(f"[*] 临时邮箱 JWT: {masked}")
+
+    if resin_state is not None:
+        resin_state.set_current_account(email)
+
+    proxies: Any = ctx.build_proxies(current_proxy, resin_state=resin_state)
+    s = _new_session(proxies=proxies)
+
+    if not _check_network_ready(s, proxies=proxies):
+        return None, None, email, "network_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
     oauth_start = oauth.generate_oauth_url()
     url = oauth_start.auth_url
 
     try:
-        resp = s.get(url, proxies=proxies, verify=True, timeout=15)
-        did = s.cookies.get("oai-did")
-        print(f"[*] Device ID: {did}")
+        s, current_proxy, proxies, did, sentinel = _bootstrap_initial_device_with_proxy_refresh(
+            url,
+            current_proxy,
+            get_next_proxy=get_next_proxy,
+            resin_state=resin_state,
+        )
+        if not did or not sentinel:
+            return None, None, email, "other_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
         signup_body = f'{{"username":{{"value":"{email}","kind":"email"}},"screen_hint":"signup"}}'
-        sen_req_body = f'{{"p":"","id":"{did}","flow":"authorize_continue"}}'
 
-        sen_resp = requests.post(
-            "https://sentinel.openai.com/backend-api/sentinel/req",
-            headers={
-                "origin": "https://sentinel.openai.com",
-                "referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
-                "content-type": "text/plain;charset=UTF-8",
-            },
-            data=sen_req_body,
-            proxies=proxies,
-            impersonate="safari",
-            verify=ctx._ssl_verify(),
-            timeout=15,
-        )
-
-        if sen_resp.status_code != 200:
-            print(f"[Error] Sentinel 异常拦截，状态码: {sen_resp.status_code}")
-            return None, None
-
-        sen_token = sen_resp.json()["token"]
-        sentinel = f'{{"p": "", "t": "", "c": "{sen_token}", "id": "{did}", "flow": "authorize_continue"}}'
-
-        signup_resp = s.post(
-            "https://auth.openai.com/api/accounts/authorize/continue",
-            headers={
-                "referer": "https://auth.openai.com/create-account",
-                "accept": "application/json",
-                "content-type": "application/json",
-                "openai-sentinel-token": sentinel,
-            },
-            data=signup_body,
-            proxies=proxies,
-            verify=ctx._ssl_verify(),
+        signup_resp = _call_with_timeout_retry(
+            lambda: s.post(
+                "https://auth.openai.com/api/accounts/authorize/continue",
+                headers={
+                    "referer": "https://auth.openai.com/create-account",
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                    "openai-sentinel-token": sentinel,
+                },
+                data=signup_body,
+                proxies=proxies,
+                verify=ctx._ssl_verify(),
+                timeout=30,
+            ),
+            label="提交注册表单",
         )
         signup_status = signup_resp.status_code
         print(f"[*] 提交注册表单状态: {signup_status}")
 
         if signup_status == 403:
             print("[Error] 提交注册表单返回 403，中断本次运行，将在10秒后重试...")
-            return "retry_403", None, email, "403_forbidden"
+            return "retry_403", None, email, "403_forbidden", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
         if signup_status != 200:
             print("[Error] 提交注册表单失败，跳过本次流程")
             print(signup_resp.text)
-            return None, None, email, "signup_form_error"
+            return None, None, email, "signup_form_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
         password = _generate_password()
         register_body = json.dumps({"password": password, "username": email})
         print(f"[*] 生成随机密码: {password[:4]}****")
 
-        pwd_resp = s.post(
-            "https://auth.openai.com/api/accounts/user/register",
-            headers={
-                "referer": "https://auth.openai.com/create-account/password",
-                "accept": "application/json",
-                "content-type": "application/json",
-                "openai-sentinel-token": sentinel,
-            },
-            data=register_body,
-            proxies=proxies,
-            verify=ctx._ssl_verify(),
+        pwd_resp = _call_with_timeout_retry(
+            lambda: s.post(
+                "https://auth.openai.com/api/accounts/user/register",
+                headers={
+                    "referer": "https://auth.openai.com/create-account/password",
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                    "openai-sentinel-token": sentinel,
+                },
+                data=register_body,
+                proxies=proxies,
+                verify=ctx._ssl_verify(),
+                timeout=30,
+            ),
+            label="提交注册密码",
         )
         print(f"[*] 提交注册(密码)状态: {pwd_resp.status_code}")
         if pwd_resp.status_code != 200:
             print(pwd_resp.text)
-            return None, None, email, "password_error"
+            return None, None, email, "password_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
         try:
             register_json = pwd_resp.json()
@@ -231,7 +423,7 @@ def run(proxy: Optional[str]) -> tuple:
                     break
             if not code:
                 print("[Error] 多次重试后仍未收到验证码，跳过")
-                return None, None, email
+                return None, None, email, "otp_timeout", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
             print("[*] 开始校验验证码...")
             code_resp = oauth._post_with_retry(
@@ -274,7 +466,7 @@ def run(proxy: Optional[str]) -> tuple:
 
         if create_account_status != 200:
             print(create_account_resp.text)
-            return None, None, email
+            return None, None, email, "account_create_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
         try:
             create_account_json = create_account_resp.json()
         except Exception:
@@ -291,25 +483,15 @@ def run(proxy: Optional[str]) -> tuple:
         s.cookies.clear()
 
         oauth_start = oauth.generate_oauth_url()
-        s.get(oauth_start.auth_url, proxies=proxies, verify=True, timeout=15)
-        new_did = s.cookies.get("oai-did") or did
-
-        sen_req_body2 = f'{{"p":"","id":"{new_did}","flow":"authorize_continue"}}'
-        sen_resp2 = requests.post(
-            "https://sentinel.openai.com/backend-api/sentinel/req",
-            headers={
-                "origin": "https://sentinel.openai.com",
-                "referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
-                "content-type": "text/plain;charset=UTF-8",
-            },
-            data=sen_req_body2,
+        new_did, sentinel2 = _bootstrap_authorize_continue(
+            s,
+            oauth_start.auth_url,
             proxies=proxies,
-            impersonate="safari",
-            verify=ctx._ssl_verify(),
-            timeout=15,
+            device_label="重登录 Device ID",
         )
-        sen_token2 = sen_resp2.json().get("token", "") if sen_resp2.status_code == 200 else ""
-        sentinel2 = f'{{"p": "", "t": "", "c": "{sen_token2}", "id": "{new_did}", "flow": "authorize_continue"}}'
+        new_did = new_did or did
+        if not new_did or not sentinel2:
+            return None, None, email, "other_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
         oauth._post_with_retry(
             s,
@@ -344,7 +526,7 @@ def run(proxy: Optional[str]) -> tuple:
                     code2 = code
                     if not code2:
                         print("[Error] 第一次验证码为空，无法复用")
-                        return None, None, email
+                        return None, None, email, "otp_timeout", current_proxy
                     print(f"[*] 使用第一次的验证码: {code2}")
                     code2_resp = oauth._post_with_retry(
                         s,
@@ -359,14 +541,14 @@ def run(proxy: Optional[str]) -> tuple:
                     print(f"[*] 二次验证码校验状态: {code2_resp.status_code}")
                     if code2_resp.status_code != 200:
                         print(code2_resp.text)
-                        return None, None, email
+                        return None, None, email, "otp_timeout", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
             except Exception:
                 pass
 
         auth_cookie = s.cookies.get("oai-client-auth-session")
         if not auth_cookie:
             print("[Error] 重登录后未能获取授权 Cookie")
-            return None, None, email
+            return None, None, email, "callback_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
         auth_json = {}
         raw_val = auth_cookie.strip()
@@ -385,11 +567,11 @@ def run(proxy: Optional[str]) -> tuple:
         workspaces = auth_json.get("workspaces") or []
         if not workspaces:
             print("[Error] 重登录后 Cookie 里仍没有 workspace 信息")
-            return None, None, email
+            return None, None, email, "callback_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
         workspace_id = str((workspaces[0] or {}).get("id") or "").strip()
         if not workspace_id:
             print("[Error] 无法解析 workspace_id")
-            return None, None, email
+            return None, None, email, "callback_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
         select_body = f'{{"workspace_id":"{workspace_id}"}}'
         print("[*] 开始选择 workspace...")
@@ -409,12 +591,12 @@ def run(proxy: Optional[str]) -> tuple:
         if select_resp.status_code != 200:
             print(f"[Error] 选择 workspace 失败，状态码: {select_resp.status_code}")
             print(select_resp.text)
-            return None, None, email
+            return None, None, email, "callback_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
         continue_url = str((select_resp.json() or {}).get("continue_url") or "").strip()
         if not continue_url:
             print("[Error] workspace/select 响应里缺少 continue_url")
-            return None, None, email
+            return None, None, email, "callback_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
         try:
             select_data = select_resp.json()
@@ -449,12 +631,15 @@ def run(proxy: Optional[str]) -> tuple:
 
         current_url = continue_url
         for _ in range(15):
-            final_resp = s.get(
-                current_url,
-                allow_redirects=False,
-                proxies=proxies,
-                verify=ctx._ssl_verify(),
-                timeout=15,
+            final_resp = _call_with_timeout_retry(
+                lambda: s.get(
+                    current_url,
+                    allow_redirects=False,
+                    proxies=proxies,
+                    verify=ctx._ssl_verify(),
+                    timeout=15,
+                ),
+                label="跟踪重定向链",
             )
 
             if final_resp.status_code in [301, 302, 303, 307, 308]:
@@ -463,13 +648,16 @@ def run(proxy: Optional[str]) -> tuple:
                 )
             elif final_resp.status_code == 200:
                 if "consent_challenge=" in current_url:
-                    c_resp = s.post(
-                        current_url,
-                        data={"action": "accept"},
-                        allow_redirects=False,
-                        proxies=proxies,
-                        verify=ctx._ssl_verify(),
-                        timeout=15,
+                    c_resp = _call_with_timeout_retry(
+                        lambda: s.post(
+                            current_url,
+                            data={"action": "accept"},
+                            allow_redirects=False,
+                            proxies=proxies,
+                            verify=ctx._ssl_verify(),
+                            timeout=15,
+                        ),
+                        label="提交授权确认",
                     )
                     next_url = (
                         urllib.parse.urljoin(
@@ -501,12 +689,12 @@ def run(proxy: Optional[str]) -> tuple:
                     redirect_uri=oauth_start.redirect_uri,
                     expected_state=oauth_start.state,
                 )
-                return token_json, password, email
+                return token_json, password, email, "", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
             current_url = next_url
 
         print("[Error] 未能在重定向链中捕获到最终 Callback URL")
-        return None, None, email
+        return None, None, email, "callback_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)
 
     except Exception as e:
         print(f"[Error] 运行时发生错误: {e}")
-        return None, None, email
+        return None, None, email, "other_error", ctx.build_proxy_url(current_proxy, resin_state=resin_state)

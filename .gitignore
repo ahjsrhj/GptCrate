@@ -18,6 +18,8 @@ env/
 
 # Env
 .env
+.env.*
+!.env.example
 
 # Tokens (敏感数据)
 token_*.json

@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from . import codex2api
 from . import context as ctx
 from . import mail, oauth, register
 from . import sub_format
@@ -191,6 +192,16 @@ def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> No
                 af.write(f"{account_email}----{password}\n")
         _safe_print(f"[*] 账号密码已追加至: {accounts_file}")
 
+    if t_data:
+        try:
+            sync_result = codex2api.upload_account(t_data, proxy_str)
+            if sync_result.get("attempted") and sync_result.get("ok"):
+                _safe_print(f"[*] Codex2Api 同步成功: {sync_result.get('message', 'ok')}")
+            elif sync_result.get("attempted"):
+                _safe_print(f"[Warning] Codex2Api 同步失败: {sync_result.get('reason', 'unknown_error')}")
+        except Exception as exc:
+            _safe_print(f"[Warning] Codex2Api 同步异常: {exc}")
+
     if account_email:
         mail.delete_temp_email(account_email, proxies=ctx.build_proxies(proxy_str))
 
@@ -244,6 +255,7 @@ def _print_runtime_summary(
     effective_single_proxy: Optional[str],
     thread_count: int,
     batch_count: Optional[int],
+    resin_state: Optional[ctx.ResinRunState] = None,
 ) -> None:
     rows = [
         _kv("邮箱模式", _resolve_mode_label(), value_style="cyan"),
@@ -252,6 +264,9 @@ def _print_runtime_summary(
         rows.append(_kv("代理模式", f"文件轮换 ({len(rotator)} 个代理)", value_style="blue"))
     elif effective_single_proxy:
         rows.append(_kv("代理模式", f"单代理 ({effective_single_proxy})", value_style="blue"))
+    elif ctx.is_resin_enabled():
+        resin_proxy = ctx.build_proxy_url(None, resin_state=resin_state) or "-"
+        rows.append(_kv("代理模式", f"Resin 粘性代理 ({resin_proxy})", value_style="blue"))
     else:
         rows.append(_kv("代理模式", "直连 (未配置代理)", value_style="blue"))
     if batch_count:
@@ -262,7 +277,7 @@ def _print_runtime_summary(
         rows.append(_kv("邮箱类型", ctx.HOTMAIL007_MAIL_TYPE, value_style="magenta"))
         rows.append(_kv("收信模式", ctx.HOTMAIL007_MAIL_MODE.upper(), value_style="magenta"))
         check_proxy_str = effective_single_proxy or (rotator.next() if len(rotator) > 0 else None)
-        proxies_check = ctx.build_proxies(check_proxy_str)
+        proxies_check = ctx.build_proxies(check_proxy_str, resin_state=resin_state)
         bal, bal_err = mail.hotmail007_get_balance(proxies=proxies_check)
         if bal is not None:
             rows.append(_kv("账户余额", str(bal), value_style="green"))
@@ -351,11 +366,12 @@ def _apply_check_mode_batch_target(
     rotator: ctx.ProxyRotator,
     effective_single_proxy: Optional[str],
     batch_count: Optional[int],
+    resin_state: Optional[ctx.ResinRunState] = None,
 ) -> Optional[int]:
     if not enabled:
         return batch_count
     check_proxy = effective_single_proxy or (rotator.next() if len(rotator) > 0 else None)
-    stats = oauth.check_codex_tokens(proxies=ctx.build_proxies(check_proxy))
+    stats = oauth.check_codex_tokens(proxies=ctx.build_proxies(check_proxy, resin_state=resin_state))
     valid_count = stats.get("valid", 0)
     if valid_count >= ctx.AUTO_REGISTER_THRESHOLD:
         print(f"[*] 当前可用 token {valid_count} 个，已达到阈值 {ctx.AUTO_REGISTER_THRESHOLD}，不执行自动注册")
@@ -365,7 +381,10 @@ def _apply_check_mode_batch_target(
     return need_count
 
 
-def _start_luckmail_prefetch(rotator: ctx.ProxyRotator) -> Optional[threading.Thread]:
+def _start_luckmail_prefetch(
+    rotator: ctx.ProxyRotator,
+    resin_state: Optional[ctx.ResinRunState] = None,
+) -> Optional[threading.Thread]:
     if ctx.EMAIL_MODE != "luckmail" or not ctx.LUCKMAIL_AUTO_BUY:
         return None
 
@@ -385,6 +404,7 @@ def _start_luckmail_prefetch(rotator: ctx.ProxyRotator) -> Optional[threading.Th
     prefetch_thread = threading.Thread(
         target=mail._prefetch_active_emails,
         args=(rotator, 10, 20),
+        kwargs={"resin_state": resin_state},
         daemon=True,
     )
     prefetch_thread.start()
@@ -563,8 +583,11 @@ def _worker(
         local_round += 1
         proxy_str = rotator.next() if len(rotator) > 0 else single_proxy
         tag = f"[T{worker_id}#{local_round}]"
+        proxy_label = proxy_str
+        if not proxy_label and ctx.is_resin_enabled() and not single_proxy and len(rotator) == 0:
+            proxy_label = "Resin 动态代理"
 
-        _print_with_stats_clear(f"[{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_str or '直连'})", "")
+        _print_with_stats_clear(f"[{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_label or '直连'})", "")
 
         email_used = None
         fail_reason = None
@@ -573,11 +596,13 @@ def _worker(
             if ctx._reg_stats:
                 ctx._reg_stats.add_attempt()
 
-            result = register.run(proxy_str)
+            next_proxy_getter = rotator.next if len(rotator) > 1 else None
+            result = register.run(proxy_str, get_next_proxy=next_proxy_getter)
             token_json = result[0] if result else None
             password = result[1] if result else None
             email_used = result[2] if len(result) > 2 else None
             fail_reason = result[3] if len(result) > 3 else "other_error"
+            used_proxy = result[4] if len(result) > 4 else proxy_str
 
             if token_json == "retry_403":
                 _print_with_stats_clear("检测到 403，等待10秒后重试...", tag)
@@ -591,7 +616,7 @@ def _worker(
                 continue
 
             if token_json:
-                _save_result(token_json, password, proxy_str)
+                _save_result(token_json, password, used_proxy)
                 local_success += 1
                 with ctx._success_counter_lock:
                     ctx._success_counter += 1
@@ -692,9 +717,21 @@ def main() -> None:
     except SystemExit:
         return
 
-    proxy_file_path = args.proxy_file or ctx.PROXY_FILE
-    rotator = ctx.ProxyRotator(ctx._load_proxies(proxy_file_path))
     effective_single_proxy = args.proxy or ctx.SINGLE_PROXY or None
+    use_resin_proxy = ctx.is_resin_enabled() and not effective_single_proxy
+    runtime_resin_state = ctx.ResinRunState() if use_resin_proxy else None
+    if use_resin_proxy:
+        try:
+            ctx.parse_resin_url()
+        except ValueError as exc:
+            print(f"[Error] Resin 配置错误: {exc}")
+            return
+        if args.proxy_file or ctx.PROXY_FILE:
+            print("[*] 检测到 Resin 配置，已忽略 PROXY_FILE/--proxy-file")
+        rotator = ctx.ProxyRotator([])
+    else:
+        proxy_file_path = args.proxy_file or ctx.PROXY_FILE
+        rotator = ctx.ProxyRotator(ctx._load_proxies(proxy_file_path))
     thread_count = _resolve_thread_count(args.threads)
     batch_count = _resolve_batch_count(args.count)
     try:
@@ -703,14 +740,15 @@ def main() -> None:
             rotator=rotator,
             effective_single_proxy=effective_single_proxy,
             batch_count=batch_count,
+            resin_state=runtime_resin_state,
         )
     except SystemExit:
         return
     sleep_min = max(1, args.sleep_min)
     sleep_max = max(sleep_min, args.sleep_max)
 
-    _print_runtime_summary(rotator, effective_single_proxy, thread_count, batch_count)
-    _start_luckmail_prefetch(rotator)
+    _print_runtime_summary(rotator, effective_single_proxy, thread_count, batch_count, resin_state=runtime_resin_state)
+    _start_luckmail_prefetch(rotator, resin_state=runtime_resin_state)
     if ctx.EMAIL_MODE == "luckmail" and (ctx._luckmail_purchased_only or ctx._luckmail_own_only):
         if ctx._active_email_queue is None or ctx._active_email_queue.is_empty():
             if ctx._luckmail_own_only:

@@ -192,6 +192,10 @@ def generate_env(
     cf_worker_base: str = "",
     cf_admin_password: str = "",
 ) -> None:
+    codex2api_base_url = _read_env_value(".env", "CODEX2API_BASE_URL") or ""
+    codex2api_admin_secret = _read_env_value(".env", "CODEX2API_ADMIN_SECRET") or ""
+    resin_url = _read_env_value(".env", "RESIN_URL") or ""
+    resin_platform_name = _read_env_value(".env", "RESIN_PLATFORM_NAME") or ""
     batch_count_line = f"BATCH_COUNT={count}" if count else "# BATCH_COUNT=10"
     batch_threads_line = f"BATCH_THREADS={threads}"
     env_content = f"""MAIL_DOMAIN={cf_domain}
@@ -199,6 +203,14 @@ MAIL_WORKER_BASE={cf_worker_base}
 MAIL_ADMIN_PASSWORD={cf_admin_password}
 TOKEN_OUTPUT_DIR=./tokens
 CLI_PROXY_AUTHS_DIR=
+
+# Codex2Api 同步配置（留空则禁用）
+CODEX2API_BASE_URL={codex2api_base_url}
+CODEX2API_ADMIN_SECRET={codex2api_admin_secret}
+
+# Resin 粘性代理（配置后将忽略 PROXY_FILE）
+RESIN_URL={resin_url}
+RESIN_PLATFORM_NAME={resin_platform_name}
 
 PROXY_FILE=proxies.txt
 
@@ -291,10 +303,7 @@ def run_gpt(count: Optional[int], threads: int) -> None:
     
     if threads > 1:
         cmd.extend(["--threads", str(threads)])
-    
-    cmd.append("--proxy-file")
-    cmd.append("proxies.txt")
-    
+
     print("\n" + "=" * 50)
     print("开始运行 OpenAI 注册工具...")
     print("=" * 50 + "\n")

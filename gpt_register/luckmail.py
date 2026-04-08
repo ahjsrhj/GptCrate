@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import concurrent.futures
 import re
 import threading
@@ -548,14 +550,20 @@ def _select_latest_unseen_code(mails: list[dict], seen_ids: set[str] | None = No
     return "", ""
 
 
-def _prefetch_active_emails(rotator: ctx.ProxyRotator, min_pool_size: int = 10, batch_size: int = 20):
+def _prefetch_active_emails(
+    rotator: ctx.ProxyRotator,
+    min_pool_size: int = 10,
+    batch_size: int = 20,
+    *,
+    resin_state: ctx.ResinRunState | None = None,
+):
     if ctx._active_email_queue is None:
         ctx._active_email_queue = ctx.ActiveEmailQueue()
 
     if ctx._luckmail_own_only:
         print("\n[*] [预检测] 只加载我的邮箱...")
         proxy = rotator.next() if len(rotator) > 0 else None
-        proxies = ctx.build_proxies(proxy)
+        proxies = ctx.build_proxies(proxy, resin_state=resin_state)
         own_active = luckmail_collect_private_emails(
             proxies=proxies,
             active_queue=ctx._active_email_queue,
@@ -571,7 +579,7 @@ def _prefetch_active_emails(rotator: ctx.ProxyRotator, min_pool_size: int = 10, 
     else:
         print("\n[*] [预检测] 首先检查已购邮箱...")
         proxy = rotator.next() if len(rotator) > 0 else None
-        proxies = ctx.build_proxies(proxy)
+        proxies = ctx.build_proxies(proxy, resin_state=resin_state)
         purchased_active = luckmail_check_purchased_emails(
             proxies=proxies,
             max_workers=ctx.LUCKMAIL_CHECK_WORKERS,
@@ -593,7 +601,7 @@ def _prefetch_active_emails(rotator: ctx.ProxyRotator, min_pool_size: int = 10, 
                 print(f"[*] [预检测] 活跃邮箱池不足 ({current_size}/{min_pool_size})，批量购买 {batch_size} 个...")
                 print(f"{'=' * 50}")
                 proxy = rotator.next() if len(rotator) > 0 else None
-                proxies = ctx.build_proxies(proxy)
+                proxies = ctx.build_proxies(proxy, resin_state=resin_state)
                 active_emails, error_msg = luckmail_batch_buy_and_check(
                     quantity=batch_size,
                     max_workers=ctx.LUCKMAIL_CHECK_WORKERS,

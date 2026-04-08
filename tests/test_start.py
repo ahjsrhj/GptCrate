@@ -82,6 +82,48 @@ class StartPyTests(unittest.TestCase):
             self.assertIn("LUCKMAIL_AUTO_BUY=true", content)
             self.assertIn("LUCKMAIL_SKIP_PURCHASED=false", content)
             self.assertIn("LUCKMAIL_CHECK_WORKERS=20", content)
+            self.assertIn("CODEX2API_BASE_URL=", content)
+            self.assertIn("CODEX2API_ADMIN_SECRET=", content)
+            self.assertIn("RESIN_URL=", content)
+            self.assertIn("RESIN_PLATFORM_NAME=", content)
+
+    def test_generate_env_preserves_existing_codex2api_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):
+            with open(".env", "w", encoding="utf-8") as handle:
+                handle.write("CODEX2API_BASE_URL=https://codex2api.example.com/\n")
+                handle.write("CODEX2API_ADMIN_SECRET=secret-admin-key\n")
+
+            start.generate_env(
+                platform="luckmail",
+                api_key="secret-key",
+                count=1,
+                threads=1,
+            )
+
+            with open(".env", "r", encoding="utf-8") as handle:
+                content = handle.read()
+
+            self.assertIn("CODEX2API_BASE_URL=https://codex2api.example.com/", content)
+            self.assertIn("CODEX2API_ADMIN_SECRET=secret-admin-key", content)
+
+    def test_generate_env_preserves_existing_resin_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):
+            with open(".env", "w", encoding="utf-8") as handle:
+                handle.write("RESIN_URL=http://127.0.0.1:2260/my-token\n")
+                handle.write("RESIN_PLATFORM_NAME=reg\n")
+
+            start.generate_env(
+                platform="luckmail",
+                api_key="secret-key",
+                count=1,
+                threads=1,
+            )
+
+            with open(".env", "r", encoding="utf-8") as handle:
+                content = handle.read()
+
+            self.assertIn("RESIN_URL=http://127.0.0.1:2260/my-token", content)
+            self.assertIn("RESIN_PLATFORM_NAME=reg", content)
 
     def test_generate_env_supports_luckmail_own_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):

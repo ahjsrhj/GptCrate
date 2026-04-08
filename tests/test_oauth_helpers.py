@@ -38,6 +38,27 @@ class OAuthHelperTests(unittest.TestCase):
         self.assertEqual(payload["account_id"], "acct_123")
         self.assertEqual(payload["email"], "user@example.com")
 
+    def test_post_with_retry_retries_three_times_on_timeout_before_success(self):
+        session = mock.Mock()
+        timeout_error = Exception(
+            "Failed to perform, curl: (28) Connection timed out after 15001 milliseconds."
+        )
+        response = mock.Mock(status_code=200)
+        session.post.side_effect = [timeout_error, timeout_error, timeout_error, response]
+
+        with mock.patch.object(oauth_helpers.time, "sleep") as sleep_mock:
+            result = oauth_helpers._post_with_retry(
+                session,
+                "https://example.com/api",
+                headers={"content-type": "application/json"},
+                json_body={},
+                retries=1,
+            )
+
+        self.assertIs(result, response)
+        self.assertEqual(session.post.call_count, 4)
+        self.assertEqual(sleep_mock.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

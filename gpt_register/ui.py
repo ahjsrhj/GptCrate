@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from typing import Any
 
@@ -62,4 +64,3 @@ def rich_print(*args: Any, sep: str = " ", end: str = "\n", flush: bool = False,
     style = _style_for_text(text)
     renderable: RenderableType = Text(text, style=style) if style else Text(text)
     console.print(renderable, end=end, highlight=False, soft_wrap=True)
-

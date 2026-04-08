@@ -38,6 +38,8 @@ class GptMainTests(unittest.TestCase):
         self._original_globals = {
             "EMAIL_MODE": ctx.EMAIL_MODE,
             "ACCOUNTS_FILE": ctx.ACCOUNTS_FILE,
+            "BATCH_COUNT": ctx.BATCH_COUNT,
+            "BATCH_THREADS": ctx.BATCH_THREADS,
             "LUCKMAIL_AUTO_BUY": ctx.LUCKMAIL_AUTO_BUY,
             "LUCKMAIL_PURCHASED_ONLY": ctx.LUCKMAIL_PURCHASED_ONLY,
             "LUCKMAIL_OWN_ONLY": ctx.LUCKMAIL_OWN_ONLY,
@@ -45,11 +47,17 @@ class GptMainTests(unittest.TestCase):
             "LOCAL_OUTLOOK_BAD_FILE": ctx.LOCAL_OUTLOOK_BAD_FILE,
             "LUCKMAIL_CHECK_WORKERS": ctx.LUCKMAIL_CHECK_WORKERS,
             "LUCKMAIL_MAX_RETRY": ctx.LUCKMAIL_MAX_RETRY,
+            "RESIN_URL": ctx.RESIN_URL,
+            "RESIN_PLATFORM_NAME": ctx.RESIN_PLATFORM_NAME,
             "_email_queue": ctx._email_queue,
             "_active_email_queue": ctx._active_email_queue,
             "_luckmail_own_only": ctx._luckmail_own_only,
             "_success_counter": ctx._success_counter,
         }
+        ctx.BATCH_COUNT = ""
+        ctx.BATCH_THREADS = ""
+        ctx.RESIN_URL = ""
+        ctx.RESIN_PLATFORM_NAME = ""
 
     def tearDown(self):
         for key, value in self._original_globals.items():
@@ -105,6 +113,25 @@ class GptMainTests(unittest.TestCase):
         worker_mock.assert_called_once()
         self.assertEqual(worker_mock.call_args.kwargs["count_target"], 1)
         self.assertEqual(worker_mock.call_args.kwargs["remaining"], [1])
+
+    def test_main_ignores_proxy_file_when_resin_enabled(self):
+        ctx.EMAIL_MODE = "cf"
+        ctx.LUCKMAIL_AUTO_BUY = False
+        ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
+        ctx.RESIN_PLATFORM_NAME = "reg"
+        argv = ["gpt.py", "--once", "--proxy-file", "ignored.txt"]
+
+        with ExitStack() as stack:
+            worker_mock = stack.enter_context(mock.patch.object(cli, "_worker"))
+            load_proxies_mock = stack.enter_context(mock.patch.object(ctx, "_load_proxies", return_value=["http://proxy.example:8080"]))
+            stack.enter_context(mock.patch.object(cli.threading, "Thread", FakeThread))
+            stack.enter_context(mock.patch.object(cli.time, "sleep", return_value=None))
+            stack.enter_context(mock.patch.object(sys, "argv", argv))
+            with redirect_stdout(StringIO()):
+                cli.main()
+
+        load_proxies_mock.assert_not_called()
+        worker_mock.assert_called_once()
 
     def test_main_uses_env_batch_threads_when_cli_keeps_default_thread_count(self):
         ctx.EMAIL_MODE = "cf"
@@ -210,7 +237,12 @@ class GptMainTests(unittest.TestCase):
                 ctx.TOKEN_OUTPUT_DIR = temp_dir
                 ctx.CLI_PROXY_AUTHS_DIR = ""
                 with mock.patch.object(cli.time, "time", return_value=1775622635), \
-                     mock.patch.object(cli.mail, "delete_temp_email") as delete_mock:
+                     mock.patch.object(cli.mail, "delete_temp_email") as delete_mock, \
+                     mock.patch.object(
+                         cli.codex2api,
+                         "upload_account",
+                         return_value={"attempted": True, "ok": True, "message": "成功添加 1 个账号"},
+                     ) as upload_mock:
                     cli._save_result(token_json, "secret-pass", None)
 
                 cpa_path = os.path.join(temp_dir, "token_user_example.com_1775622635.json")
@@ -231,7 +263,52 @@ class GptMainTests(unittest.TestCase):
                     sub_data["accounts"][0]["credentials"]["chatgpt_account_id"],
                     "acc-001",
                 )
+                upload_mock.assert_called_once_with(
+                    {
+                        "access_token": "access-token",
+                        "refresh_token": "refresh-token",
+                        "account_id": "acc-001",
+                        "email": "user@example.com",
+                        "type": "codex",
+                        "expired": "2026-04-18T04:30:34Z",
+                    },
+                    None,
+                )
                 delete_mock.assert_called_once_with("user@example.com", proxies=None)
+            finally:
+                ctx.TOKEN_OUTPUT_DIR = original_output_dir
+                ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir
+
+    def test_save_result_keeps_local_files_when_codex2api_upload_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_json = (
+                '{"access_token":"access-token","refresh_token":"refresh-token",'
+                '"account_id":"acc-001","email":"user@example.com","type":"codex",'
+                '"expired":"2026-04-18T04:30:34Z"}'
+            )
+            original_output_dir = ctx.TOKEN_OUTPUT_DIR
+            original_proxy_auths_dir = ctx.CLI_PROXY_AUTHS_DIR
+
+            try:
+                ctx.TOKEN_OUTPUT_DIR = temp_dir
+                ctx.CLI_PROXY_AUTHS_DIR = ""
+                with mock.patch.object(cli.time, "time", return_value=1775622635), \
+                     mock.patch.object(cli.mail, "delete_temp_email") as delete_mock, \
+                     mock.patch.object(
+                         cli.codex2api,
+                         "upload_account",
+                         return_value={"attempted": True, "ok": False, "reason": "HTTP 500"},
+                     ) as upload_mock:
+                    cli._save_result(token_json, "secret-pass", "http://127.0.0.1:8080")
+
+                self.assertTrue(os.path.exists(os.path.join(temp_dir, "token_user_example.com_1775622635.json")))
+                self.assertTrue(os.path.exists(os.path.join(temp_dir, "sub_user_example.com_1775622635.json")))
+                self.assertTrue(os.path.exists(os.path.join(temp_dir, "accounts.txt")))
+                upload_mock.assert_called_once()
+                delete_mock.assert_called_once_with(
+                    "user@example.com",
+                    proxies={"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"},
+                )
             finally:
                 ctx.TOKEN_OUTPUT_DIR = original_output_dir
                 ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir

@@ -22,6 +22,7 @@ CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEFAULT_SCOPE = "openid email profile offline_access"
+_TIMEOUT_RETRY_LIMIT = 3
 
 
 
@@ -123,6 +124,20 @@ def _to_int(v: Any) -> int:
         return 0
 
 
+def _is_timeout_error(error: Any) -> bool:
+    text = str(error or "").strip().lower()
+    if not text:
+        return False
+    timeout_markers = [
+        "timed out",
+        "timeout",
+        "curl: (28)",
+        "operation timed out",
+        "connection timed out",
+    ]
+    return any(marker in text for marker in timeout_markers)
+
+
 
 def _post_form(url: str, data: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
     body = urllib.parse.urlencode(data).encode("utf-8")
@@ -166,7 +181,8 @@ def _post_with_retry(
     retries: int = 2,
 ) -> Any:
     last_error: Optional[Exception] = None
-    for attempt in range(retries + 1):
+    max_attempts = max(retries, _TIMEOUT_RETRY_LIMIT) + 1
+    for attempt in range(max_attempts):
         try:
             if json_body is not None:
                 return session.post(
@@ -187,7 +203,8 @@ def _post_with_retry(
             )
         except Exception as e:
             last_error = e
-            if attempt >= retries:
+            allowed_retries = max(retries, _TIMEOUT_RETRY_LIMIT) if _is_timeout_error(e) else retries
+            if attempt >= allowed_retries:
                 break
             time.sleep(2 * (attempt + 1))
     if last_error:

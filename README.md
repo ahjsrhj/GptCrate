@@ -34,6 +34,8 @@
 EMAIL_MODE=luckmail
 LUCKMAIL_API_KEY=你的API密钥
 TOKEN_OUTPUT_DIR=./tokens
+CODEX2API_BASE_URL=
+CODEX2API_ADMIN_SECRET=
 ```
 
 ---
@@ -124,6 +126,23 @@ pip install curl_cffi
 ---
 
 ## 配置文件 (.env)
+
+### Codex2Api 同步（可选）
+
+如果你希望注册成功后自动把账号同步到 Codex2Api 管理端，可额外配置：
+
+```env
+CODEX2API_BASE_URL=http://localhost:8080
+CODEX2API_ADMIN_SECRET=your-admin-secret
+```
+
+- 程序会在本地保存 token、sub 导出和 `tokens/accounts.txt` 后，再调用 `POST /api/admin/accounts`
+- 上传字段固定为：
+  - `name`: 注册邮箱
+  - `refresh_token`: 新账号的 Refresh Token
+  - `proxy_url`: 当前线程实际使用的代理，直连时为空字符串
+- 未配置上述变量时自动跳过同步
+- 同步失败只打印警告，不影响本地保存和注册成功统计
 
 ### 邮箱模式
 
@@ -250,7 +269,14 @@ LUCKMAIL_MAX_RETRY=3
 
 ### 代理配置
 
-两种方式二选一：
+代理优先级：
+
+- `--proxy` / `PROXY`
+- `RESIN_URL` + `RESIN_PLATFORM_NAME`
+- `--proxy-file` / `PROXY_FILE`
+- 直连
+
+#### 1. 单代理 / 代理文件
 
 ```env
 # 方式一：单代理
@@ -259,6 +285,26 @@ PROXY=http://127.0.0.1:7890
 # 方式二：代理列表文件 (批量注册时自动轮换)
 PROXY_FILE=proxies.txt
 ```
+
+#### 2. Resin 粘性代理
+
+```env
+RESIN_URL=http://127.0.0.1:2260/my-token
+RESIN_PLATFORM_NAME=reg
+```
+
+- 配置了 Resin 后，会自动忽略 `PROXY_FILE` 和 `--proxy-file`
+- `RESIN_URL` 格式为 `scheme://host:port/token`
+- 程序会自动组装为：
+  - `http://{platform.account}:{token}@{host}:{port}`
+- 例如：
+  - `RESIN_URL=http://127.0.0.1:2260/my-token`
+  - `RESIN_PLATFORM_NAME=reg`
+  - 当前账号标识为 `user_1`
+  - 最终代理 URL 为 `http://reg.user_1:my-token@127.0.0.1:2260`
+- 当账号邮箱已经可用时，优先使用邮箱作为 Resin `Account`
+- 若注册流程进入“请求失败后切换代理”的恢复分支，程序会放弃当前邮箱 `Account`，重新生成一个新的 6 位 startup account，并基于它重建 Resin 代理继续后续请求
+- 对于启动前或尚未拿到邮箱的请求，程序会自动生成一个随机 6 位 startup account
 
 ### 批量注册配置
 
@@ -305,7 +351,7 @@ socks5://user:pass@proxy2.com:1080
 | 参数                     | 默认值               | 说明                                        |
 | ------------------------ | -------------------- | ------------------------------------------- |
 | `--proxy`                | 无                   | 单个代理地址                                |
-| `--proxy-file`           | 读 .env `PROXY_FILE` | 代理列表文件路径                            |
+| `--proxy-file`           | 读 .env `PROXY_FILE` | 代理列表文件路径；启用 Resin 时忽略         |
 | `--count`                | 无 (无限循环)        | 批量注册数量，注册够了自动停止              |
 | `--threads`              | 1                    | 并发线程数                                  |
 | `--once`                 | -                    | 只运行一次 (等同 `--count 1`)               |
@@ -381,7 +427,20 @@ uv run python gpt.py --proxy-file proxies.txt --threads 2
 
 不指定 `--count` 时为无限循环模式，按 `Ctrl+C` 停止。
 
-### 9. 本地 Outlook 导入模式
+### 9. 使用 Resin 粘性代理
+
+```env
+RESIN_URL=http://127.0.0.1:2260/my-token
+RESIN_PLATFORM_NAME=reg
+```
+
+```bash
+uv run python gpt.py --once
+```
+
+启用后不需要再传 `--proxy-file`，程序会按账号动态组装 Resin 代理。
+
+### 10. 本地 Outlook 导入模式
 
 ```env
 EMAIL_MODE=local_outlook
@@ -399,13 +458,15 @@ your@hotmail.com----your_password----client_id----refresh_token
 uv run python gpt.py --count 1 --threads 1
 ```
 
-### 10. 自建邮箱 / Cloudflare Worker 模式
+### 11. 自建邮箱 / Cloudflare Worker 模式
 
 ```env
 EMAIL_MODE=cf
 MAIL_DOMAIN=your-domain.com
 MAIL_WORKER_BASE=https://mail-worker.your-domain.com
 MAIL_ADMIN_PASSWORD=your-password
+CODEX2API_BASE_URL=http://localhost:8080
+CODEX2API_ADMIN_SECRET=your-admin-secret
 ```
 
 ```bash
