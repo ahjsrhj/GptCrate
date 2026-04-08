@@ -42,8 +42,12 @@ BATCH_THREADS = os.getenv("BATCH_THREADS", "").strip()
 EMAIL_MODE = os.getenv("EMAIL_MODE", "cf").strip().lower()
 HOTMAIL007_API_URL = os.getenv("HOTMAIL007_API_URL", "https://gapi.hotmail007.com").rstrip("/")
 HOTMAIL007_API_KEY = os.getenv("HOTMAIL007_API_KEY", "").strip()
-HOTMAIL007_MAIL_TYPE = os.getenv("HOTMAIL007_MAIL_TYPE", "outlook Trusted Graph").strip()
+HOTMAIL007_MAIL_TYPE = os.getenv("HOTMAIL007_MAIL_TYPE", "outlook").strip()
 HOTMAIL007_MAIL_MODE = os.getenv("HOTMAIL007_MAIL_MODE", "graph").strip().lower()
+try:
+    HOTMAIL007_MAX_RETRY = max(1, int(os.getenv("HOTMAIL007_MAX_RETRY", "3").strip()))
+except ValueError:
+    HOTMAIL007_MAX_RETRY = 3
 LOCAL_OUTLOOK_MAIL_MODE = os.getenv("LOCAL_OUTLOOK_MAIL_MODE", "graph").strip().lower()
 LOCAL_OUTLOOK_BAD_FILE = os.getenv("LOCAL_OUTLOOK_BAD_FILE", "bad_local_outlook.txt").strip()
 

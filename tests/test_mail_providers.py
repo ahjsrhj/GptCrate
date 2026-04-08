@@ -18,6 +18,7 @@ class MailProviderTests(unittest.TestCase):
             "LOCAL_OUTLOOK_BAD_FILE": ctx.LOCAL_OUTLOOK_BAD_FILE,
             "LUCKMAIL_API_KEY": ctx.LUCKMAIL_API_KEY,
             "HOTMAIL007_API_KEY": ctx.HOTMAIL007_API_KEY,
+            "HOTMAIL007_MAX_RETRY": ctx.HOTMAIL007_MAX_RETRY,
             "_email_queue": ctx._email_queue,
             "_active_email_queue": ctx._active_email_queue,
             "_luckmail_purchased_only": ctx._luckmail_purchased_only,
@@ -37,6 +38,7 @@ class MailProviderTests(unittest.TestCase):
         ctx.LOCAL_OUTLOOK_BAD_FILE = self._original["LOCAL_OUTLOOK_BAD_FILE"]
         ctx.LUCKMAIL_API_KEY = self._original["LUCKMAIL_API_KEY"]
         ctx.HOTMAIL007_API_KEY = self._original["HOTMAIL007_API_KEY"]
+        ctx.HOTMAIL007_MAX_RETRY = self._original["HOTMAIL007_MAX_RETRY"]
         ctx._email_queue = self._original["_email_queue"]
         ctx._active_email_queue = self._original["_active_email_queue"]
         ctx._luckmail_purchased_only = self._original["_luckmail_purchased_only"]
@@ -58,6 +60,7 @@ class MailProviderTests(unittest.TestCase):
     def test_get_email_and_token_dispatches_to_hotmail007_mode(self):
         ctx.EMAIL_MODE = "hotmail007"
         ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
         fake_mail = {
             "email": "user@example.com",
             "password": "secret",
@@ -71,6 +74,63 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("user@example.com", "user@example.com"))
         self.assertEqual(ctx._hotmail007_credentials["user@example.com"]["known_ids"], {"known-id"})
+
+    def test_hotmail007_retries_three_times_before_success(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        fake_mail = {
+            "email": "retry@example.com",
+            "password": "secret",
+            "refresh_token": "refresh",
+            "client_id": "client",
+        }
+
+        with mock.patch.object(
+            hotmail,
+            "hotmail007_get_mail",
+            side_effect=[
+                ([], "tls error"),
+                ([], "tls error"),
+                ([fake_mail], ""),
+            ],
+        ) as get_mail_mock, \
+            mock.patch.object(hotmail, "_outlook_get_known_ids", return_value=set()), \
+            mock.patch("gpt_register.hotmail.time.sleep") as sleep_mock:
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), ("retry@example.com", "retry@example.com"))
+        self.assertEqual(get_mail_mock.call_count, 3)
+        self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_hotmail007_buy_error_retries_until_success(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        fake_mail = {
+            "email": "buy-retry@example.com",
+            "password": "secret",
+            "refresh_token": "refresh",
+            "client_id": "client",
+        }
+
+        with mock.patch.object(
+            hotmail,
+            "hotmail007_get_mail",
+            side_effect=[
+                ([], "buy error"),
+                ([], "buy error"),
+                ([], "buy error"),
+                ([fake_mail], ""),
+            ],
+        ) as get_mail_mock, \
+            mock.patch.object(hotmail, "_outlook_get_known_ids", return_value=set()), \
+            mock.patch("gpt_register.hotmail.time.sleep") as sleep_mock:
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), ("buy-retry@example.com", "buy-retry@example.com"))
+        self.assertEqual(get_mail_mock.call_count, 4)
+        self.assertEqual(sleep_mock.call_count, 3)
 
     def test_get_email_and_token_dispatches_to_local_outlook_mode(self):
         ctx.EMAIL_MODE = "local_outlook"

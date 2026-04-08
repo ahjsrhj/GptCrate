@@ -478,10 +478,25 @@ def get_email_and_token(proxies: Any = None) -> tuple:
     if not ctx.HOTMAIL007_API_KEY:
         print("[Error] ctx.HOTMAIL007_API_KEY 未配置")
         return "", ""
-    mails, err = hotmail007_get_mail(quantity=1, proxies=proxies)
-    if err or not mails:
+    max_retry = max(1, int(getattr(ctx, "HOTMAIL007_MAX_RETRY", 3) or 3))
+    mails = []
+    err = ""
+    attempt = 0
+    while True:
+        attempt += 1
+        mails, err = hotmail007_get_mail(quantity=1, proxies=proxies)
+        if not err and mails:
+            break
         print(f"[Error] Hotmail007 拉取邮箱失败: {err}")
-        return "", ""
+        err_text = str(err or "").strip().lower()
+        if err_text == "buy error":
+            print(f"[*] Hotmail007 购买邮箱暂时失败，继续重试 (第 {attempt} 次)...")
+            time.sleep(2)
+            continue
+        if attempt >= max_retry:
+            return "", ""
+        print(f"[*] Hotmail007 拉取邮箱失败，准备重试 ({attempt}/{max_retry})...")
+        time.sleep(2)
     mail_info = mails[0]
     email = mail_info["email"]
     ctx._hotmail007_credentials[email] = {

@@ -263,8 +263,10 @@ LUCKMAIL_MAX_RETRY=3
 # Hotmail007 模式配置
 HOTMAIL007_API_URL=https://gapi.hotmail007.com
 HOTMAIL007_API_KEY={api_key}
-HOTMAIL007_MAIL_TYPE=hotmail Trusted Graph
-HOTMAIL007_MAIL_MODE=imap
+HOTMAIL007_MAIL_TYPE=hotmail
+HOTMAIL007_MAIL_MODE=graph
+# 拉取邮箱失败时的最大重试次数
+HOTMAIL007_MAX_RETRY=3
 """
     elif platform == "cf":
         env_content += """

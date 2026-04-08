@@ -182,6 +182,8 @@ HOTMAIL007_API_URL=https://gapi.hotmail007.com
 HOTMAIL007_API_KEY=你的API密钥
 HOTMAIL007_MAIL_TYPE=outlook-premium
 HOTMAIL007_MAIL_MODE=imap
+# 拉取邮箱失败时的最大重试次数
+HOTMAIL007_MAX_RETRY=3
 ```
 
 `HOTMAIL007_MAIL_MODE` 支持 `graph` (Microsoft Graph API) 和 `imap` (IMAP 协议) 两种收信方式。
