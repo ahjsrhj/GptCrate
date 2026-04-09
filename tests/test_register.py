@@ -315,6 +315,50 @@ class RegisterFlowTests(unittest.TestCase):
         self.assertEqual(result[3], "signup_form_error")
         self.assertEqual(result[4], "http://reg.reset99:my-token@127.0.0.1:2260")
 
+    def test_run_prints_email_resin_proxy_before_network_check(self):
+        ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
+        ctx.RESIN_PLATFORM_NAME = "reg"
+        observed = {"printed": []}
+
+        def fake_get_email_and_token(proxies):
+            observed["provider_proxy"] = proxies["http"]
+            return "user@example.com", "dev-token"
+
+        def fake_print(message):
+            observed["printed"].append(str(message))
+
+        def fake_check_network_ready(session, proxies=None):
+            del session
+            observed["printed_before_check"] = list(observed["printed"])
+            observed["network_proxy"] = (proxies or {}).get("http")
+            return False
+
+        with mock.patch.object(register.ctx, "_generate_resin_account", return_value="start01"), \
+             mock.patch.object(register.mail, "get_email_and_token", side_effect=fake_get_email_and_token), \
+             mock.patch.object(register, "print", side_effect=fake_print), \
+             mock.patch.object(register, "_new_session", return_value=mock.Mock()), \
+             mock.patch.object(register, "_check_network_ready", side_effect=fake_check_network_ready), \
+             mock.patch.object(register, "_refresh_resin_startup_proxy_for_retry", return_value=False):
+            result = register.run(None)
+
+        self.assertEqual(
+            observed["provider_proxy"],
+            "http://reg.start01:my-token@127.0.0.1:2260",
+        )
+        self.assertEqual(
+            observed["network_proxy"],
+            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+        )
+        self.assertIn(
+            "[*] 当前使用的粘性代理: http://reg.user%40example.com:my-token@127.0.0.1:2260",
+            observed["printed_before_check"],
+        )
+        self.assertEqual(result[3], "network_error")
+        self.assertEqual(
+            result[4],
+            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+        )
+
     def test_run_stops_after_five_resin_proxy_retries_on_network_failure(self):
         ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
         ctx.RESIN_PLATFORM_NAME = "reg"

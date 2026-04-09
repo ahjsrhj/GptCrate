@@ -11,7 +11,6 @@ from . import context as ctx
 from .cf_mail import extract_otp_code
 from .ui import rich_print as print
 
-_TIMEOUT_RETRY_LIMIT = 3
 _MAIL_ACCESS_RETRY_LIMIT = 3
 _HOTMAIL007_RETRY_DELAY_SECONDS = 0.1
 
@@ -37,6 +36,13 @@ def _is_timeout_error(error: Any) -> bool:
 
 def _normalize_mail_error(error: Any) -> str:
     return re.sub(r"\s+", " ", str(error or "")).strip()[:180]
+
+
+def _is_user_cancelled_request_error(error: Any) -> bool:
+    text = str(error or "").strip().lower()
+    if not text:
+        return False
+    return "curl: (23)" in text and "failure writing output to destination" in text
 
 
 def _is_retryable_mail_access_error(reason: Any) -> bool:
@@ -169,6 +175,8 @@ def _hotmail007_api_get(path: str, proxies: Any = None, **params) -> dict:
         response = requests.get(url, proxies=proxies, verify=ctx._ssl_verify(), timeout=15, impersonate="safari")
         return response.json()
     except Exception as exc:
+        if _is_user_cancelled_request_error(exc):
+            raise KeyboardInterrupt from exc
         return {"success": False, "message": str(exc)[:200]}
 
 
@@ -627,30 +635,25 @@ def get_email_and_token(proxies: Any = None) -> tuple:
     max_retry = max(1, int(getattr(ctx, "HOTMAIL007_MAX_RETRY", 3) or 3))
     mails = []
     err = ""
-    attempt = 0
-    timeout_retry = 0
+    buy_retry = 0
+    fetch_retry = 0
     while True:
-        attempt += 1
         mails, err = hotmail007_get_mail(quantity=1, proxies=proxies)
         if not err and mails:
             break
         print(f"[Error] Hotmail007 拉取邮箱失败: {err}")
         err_text = str(err or "").strip().lower()
-        if _is_timeout_error(err):
-            timeout_retry += 1
-            if timeout_retry > _TIMEOUT_RETRY_LIMIT:
-                return "", ""
-            print(f"[*] Hotmail007 拉取邮箱请求超时，继续重试 ({timeout_retry}/{_TIMEOUT_RETRY_LIMIT})...")
-            time.sleep(_HOTMAIL007_RETRY_DELAY_SECONDS)
-            continue
-        timeout_retry = 0
+        if _is_user_cancelled_request_error(err):
+            raise KeyboardInterrupt
         if err_text == "buy error":
-            print(f"[*] Hotmail007 购买邮箱暂时失败，继续重试 (第 {attempt} 次)...")
+            buy_retry += 1
+            print(f"[*] Hotmail007 购买邮箱暂时失败，继续重试 (第 {buy_retry} 次)...")
             time.sleep(_HOTMAIL007_RETRY_DELAY_SECONDS)
             continue
-        if attempt >= max_retry:
+        fetch_retry += 1
+        if fetch_retry > max_retry:
             return "", ""
-        print(f"[*] Hotmail007 拉取邮箱失败，准备重试 ({attempt}/{max_retry})...")
+        print(f"[*] Hotmail007 拉取邮箱失败，准备重试 ({fetch_retry}/{max_retry})...")
         time.sleep(_HOTMAIL007_RETRY_DELAY_SECONDS)
     mail_info = mails[0]
     email = mail_info["email"]

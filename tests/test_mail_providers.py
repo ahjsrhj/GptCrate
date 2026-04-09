@@ -75,6 +75,33 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual((email, token), ("user@example.com", "user@example.com"))
         self.assertEqual(ctx._hotmail007_credentials["user@example.com"]["known_ids"], {"known-id"})
 
+    def test_hotmail007_api_get_raises_keyboard_interrupt_on_user_cancel(self):
+        error = (
+            "Failed to perform, curl: (23) Failure writing output to destination, "
+            "passed 13 returned 0. See https://curl.se/libcurl/c/libcurl-errors.html first for more details."
+        )
+
+        with mock.patch.object(hotmail.requests, "get", side_effect=Exception(error)):
+            with self.assertRaises(KeyboardInterrupt):
+                hotmail._hotmail007_api_get("api/mail/getMail")
+
+    def test_hotmail007_user_cancel_error_does_not_retry(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        cancel_error = (
+            "Failed to perform, curl: (23) Failure writing output to destination, "
+            "passed 13 returned 0. See https://curl.se/libcurl/c/libcurl-errors.html first for more details."
+        )
+
+        with mock.patch.object(hotmail, "hotmail007_get_mail", return_value=([], cancel_error)) as get_mail_mock, \
+            mock.patch("gpt_register.hotmail.time.sleep") as sleep_mock:
+            with self.assertRaises(KeyboardInterrupt):
+                mail.get_email_and_token()
+
+        self.assertEqual(get_mail_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+
     def test_hotmail007_retries_three_times_before_success(self):
         ctx.EMAIL_MODE = "hotmail007"
         ctx.HOTMAIL007_API_KEY = "key"
@@ -179,6 +206,71 @@ class MailProviderTests(unittest.TestCase):
                 ([], timeout_error),
                 ([], timeout_error),
                 ([], timeout_error),
+            ],
+        ) as get_mail_mock, \
+            mock.patch("gpt_register.hotmail.time.sleep") as sleep_mock:
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), ("", ""))
+        self.assertEqual(get_mail_mock.call_count, 4)
+        self.assertEqual(sleep_mock.call_count, 3)
+        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1), mock.call(0.1)])
+
+    def test_hotmail007_tls_error_uses_max_retry_after_multiple_buy_errors(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        fake_mail = {
+            "email": "tls-retry@example.com",
+            "password": "secret",
+            "refresh_token": "refresh",
+            "client_id": "client",
+        }
+        tls_error = (
+            "Failed to perform, curl: (35) TLS connect error: "
+            "error:00000000:invalid library (0):OPENSSL_internal:invalid library (0)."
+        )
+
+        with mock.patch.object(
+            hotmail,
+            "hotmail007_get_mail",
+            side_effect=[
+                ([], "buy error"),
+                ([], "buy error"),
+                ([], "buy error"),
+                ([], "buy error"),
+                ([], "buy error"),
+                ([], tls_error),
+                ([], tls_error),
+                ([fake_mail], ""),
+            ],
+        ) as get_mail_mock, \
+            mock.patch.object(hotmail, "_outlook_get_known_ids", return_value=set()), \
+            mock.patch("gpt_register.hotmail.time.sleep") as sleep_mock:
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), ("tls-retry@example.com", "tls-retry@example.com"))
+        self.assertEqual(get_mail_mock.call_count, 8)
+        self.assertEqual(sleep_mock.call_count, 7)
+        sleep_mock.assert_has_calls([mock.call(0.1)] * 7)
+
+    def test_hotmail007_tls_error_fails_after_hotmail007_max_retry(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        tls_error = (
+            "Failed to perform, curl: (35) TLS connect error: "
+            "error:00000000:invalid library (0):OPENSSL_internal:invalid library (0)."
+        )
+
+        with mock.patch.object(
+            hotmail,
+            "hotmail007_get_mail",
+            side_effect=[
+                ([], tls_error),
+                ([], tls_error),
+                ([], tls_error),
+                ([], tls_error),
             ],
         ) as get_mail_mock, \
             mock.patch("gpt_register.hotmail.time.sleep") as sleep_mock:

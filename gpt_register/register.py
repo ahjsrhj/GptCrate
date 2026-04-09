@@ -377,6 +377,8 @@ def run(proxy: Optional[str], get_next_proxy: Optional[Callable[[], Optional[str
 
     while True:
         proxies: Any = ctx.build_proxies(current_proxy, resin_state=resin_state)
+        if resin_state is not None:
+            print(f"[*] 当前使用的粘性代理: {(proxies or {}).get('http') or '直连'}")
         s = _new_session(proxies=proxies)
 
         if not _check_network_ready(s, proxies=proxies):
