@@ -13,6 +13,7 @@ from .ui import rich_print as print
 
 _TIMEOUT_RETRY_LIMIT = 3
 _MAIL_ACCESS_RETRY_LIMIT = 3
+_HOTMAIL007_RETRY_DELAY_SECONDS = 0.1
 
 
 def _resolve_outlook_mail_mode(preferred: str | None = None) -> str:
@@ -640,17 +641,17 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             if timeout_retry > _TIMEOUT_RETRY_LIMIT:
                 return "", ""
             print(f"[*] Hotmail007 拉取邮箱请求超时，继续重试 ({timeout_retry}/{_TIMEOUT_RETRY_LIMIT})...")
-            time.sleep(2)
+            time.sleep(_HOTMAIL007_RETRY_DELAY_SECONDS)
             continue
         timeout_retry = 0
         if err_text == "buy error":
             print(f"[*] Hotmail007 购买邮箱暂时失败，继续重试 (第 {attempt} 次)...")
-            time.sleep(2)
+            time.sleep(_HOTMAIL007_RETRY_DELAY_SECONDS)
             continue
         if attempt >= max_retry:
             return "", ""
         print(f"[*] Hotmail007 拉取邮箱失败，准备重试 ({attempt}/{max_retry})...")
-        time.sleep(2)
+        time.sleep(_HOTMAIL007_RETRY_DELAY_SECONDS)
     mail_info = mails[0]
     email = mail_info["email"]
     ctx._hotmail007_credentials[email] = {

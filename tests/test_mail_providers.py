@@ -102,6 +102,7 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual((email, token), ("retry@example.com", "retry@example.com"))
         self.assertEqual(get_mail_mock.call_count, 3)
         self.assertEqual(sleep_mock.call_count, 2)
+        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1)])
 
     def test_hotmail007_buy_error_retries_until_success(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -131,6 +132,7 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual((email, token), ("buy-retry@example.com", "buy-retry@example.com"))
         self.assertEqual(get_mail_mock.call_count, 4)
         self.assertEqual(sleep_mock.call_count, 3)
+        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1), mock.call(0.1)])
 
     def test_hotmail007_timeout_retries_three_times_before_success(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -161,6 +163,7 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual((email, token), ("timeout-retry@example.com", "timeout-retry@example.com"))
         self.assertEqual(get_mail_mock.call_count, 4)
         self.assertEqual(sleep_mock.call_count, 3)
+        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1), mock.call(0.1)])
 
     def test_hotmail007_timeout_fails_after_three_retries(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -184,6 +187,7 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual((email, token), ("", ""))
         self.assertEqual(get_mail_mock.call_count, 4)
         self.assertEqual(sleep_mock.call_count, 3)
+        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1), mock.call(0.1)])
 
     def test_get_email_and_token_dispatches_to_local_outlook_mode(self):
         ctx.EMAIL_MODE = "local_outlook"
