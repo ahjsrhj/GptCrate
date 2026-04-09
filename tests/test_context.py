@@ -48,8 +48,16 @@ class ResinContextTests(unittest.TestCase):
 
         self.assertEqual(
             proxies["http"],
-            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+            "http://reg.user:my-token@127.0.0.1:2260",
         )
+
+    def test_set_current_account_strips_email_domain_for_resin(self):
+        resin_state = ctx.ResinRunState(startup_account="start01")
+
+        current_account = resin_state.set_current_account("tvufekb8677@hotmail.com")
+
+        self.assertEqual(current_account, "tvufekb8677")
+        self.assertEqual(resin_state.current_account, "tvufekb8677")
 
     def test_multiple_resin_states_do_not_share_startup_accounts(self):
         state_one = ctx.ResinRunState(startup_account="aaa111")

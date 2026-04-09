@@ -302,7 +302,7 @@ class RegisterFlowTests(unittest.TestCase):
         )
         self.assertEqual(
             observed["network_proxies"][0],
-            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+            "http://reg.user:my-token@127.0.0.1:2260",
         )
         self.assertEqual(
             observed["network_proxies"][1],
@@ -347,16 +347,16 @@ class RegisterFlowTests(unittest.TestCase):
         )
         self.assertEqual(
             observed["network_proxy"],
-            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+            "http://reg.user:my-token@127.0.0.1:2260",
         )
         self.assertIn(
-            "[*] 当前使用的粘性代理: http://reg.user%40example.com:my-token@127.0.0.1:2260",
+            "[*] 当前使用的粘性代理: http://reg.user:my-token@127.0.0.1:2260",
             observed["printed_before_check"],
         )
         self.assertEqual(result[3], "network_error")
         self.assertEqual(
             result[4],
-            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+            "http://reg.user:my-token@127.0.0.1:2260",
         )
 
     def test_run_stops_after_five_resin_proxy_retries_on_network_failure(self):
@@ -389,7 +389,7 @@ class RegisterFlowTests(unittest.TestCase):
         self.assertEqual(
             observed["network_proxies"],
             [
-                "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+                "http://reg.user:my-token@127.0.0.1:2260",
                 "http://reg.retry01:my-token@127.0.0.1:2260",
                 "http://reg.retry02:my-token@127.0.0.1:2260",
                 "http://reg.retry03:my-token@127.0.0.1:2260",

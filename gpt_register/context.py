@@ -168,11 +168,21 @@ class ResinRunState:
         return self.startup_account
 
     def set_current_account(self, account: Optional[str]) -> str:
-        account_value = str(account or "").strip()
+        account_value = normalize_resin_account(account)
         if not account_value:
             return self.get_resin_startup_account()
         self.current_account = account_value
         return self.current_account
+
+
+def normalize_resin_account(account: Optional[str]) -> str:
+    account_value = str(account or "").strip()
+    if not account_value:
+        return ""
+    local_part, sep, _domain = account_value.partition("@")
+    if sep and local_part:
+        return local_part
+    return account_value
 
 
 def get_resin_startup_account(
@@ -199,7 +209,7 @@ def build_proxy_url(
     if account is not None and str(account).strip():
         account_value = state.set_current_account(account)
     else:
-        account_value = state.current_account or state.get_resin_startup_account()
+        account_value = normalize_resin_account(state.current_account) or state.get_resin_startup_account()
 
     resin_config = parse_resin_url()
     return compose_resin_proxy_url(

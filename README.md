@@ -304,7 +304,7 @@ RESIN_PLATFORM_NAME=reg
   - `RESIN_PLATFORM_NAME=reg`
   - 当前账号标识为 `user_1`
   - 最终代理 URL 为 `http://reg.user_1:my-token@127.0.0.1:2260`
-- 当账号邮箱已经可用时，优先使用邮箱作为 Resin `Account`
+- 当账号邮箱已经可用时，优先使用邮箱账号部分（`@` 前缀）作为 Resin `Account`
 - 若注册流程进入“请求失败后切换代理”的恢复分支，程序会放弃当前邮箱 `Account`，重新生成一个新的 6 位 startup account，并基于它重建 Resin 代理继续后续请求
 - 对于启动前或尚未拿到邮箱的请求，程序会自动生成一个随机 6 位 startup account
 
