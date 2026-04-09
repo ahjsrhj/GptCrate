@@ -365,6 +365,35 @@ class MailProviderTests(unittest.TestCase):
             with open(bad_file, "r", encoding="utf-8") as handle:
                 self.assertIn("broken@example.com----pass----client----refresh", handle.read())
 
+    def test_outlook_fetch_otp_graph_marks_retryable_mail_access_error_on_http_503(self):
+        ctx._hotmail007_credentials["graph503@example.com"] = {
+            "client_id": "client",
+            "refresh_token": "refresh",
+            "known_ids": set(),
+        }
+        debug_response = mock.Mock(status_code=503)
+
+        with mock.patch.object(hotmail, "_outlook_get_graph_token", return_value="graph-token"), \
+             mock.patch.object(
+                 hotmail,
+                 "_outlook_graph_get_openai_messages_detailed",
+                 return_value=([], "inbox:HTTP 503; junkemail:HTTP 503; all:HTTP 503", False),
+             ), \
+             mock.patch.object(hotmail.requests, "get", return_value=debug_response), \
+             mock.patch("gpt_register.hotmail.time.sleep"):
+            code = hotmail._outlook_fetch_otp_graph(
+                "graph503@example.com",
+                "client",
+                "refresh",
+                set(),
+                timeout=30,
+            )
+
+        self.assertEqual(code, "")
+        last_error = hotmail.get_last_mail_error("graph503@example.com")
+        self.assertTrue(last_error.startswith("mail_access_retryable:"))
+        self.assertTrue(hotmail.is_retryable_mail_error(last_error))
+
     def test_get_email_and_token_dispatches_to_luckmail_order_mode(self):
         ctx.EMAIL_MODE = "luckmail"
         ctx.LUCKMAIL_API_KEY = "key"

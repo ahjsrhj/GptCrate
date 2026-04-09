@@ -5,7 +5,9 @@ from .cf_mail import delete_temp_email as delete_cf_temp_email
 from .cf_mail import extract_otp_code as _extract_otp_code
 from .cf_mail import generate_email as get_cf_email_and_token
 from .cf_mail import get_oai_code as get_cf_oai_code
-from .hotmail import _outlook_fetch_otp, _outlook_get_known_ids, hotmail007_get_balance, hotmail007_get_mail, hotmail007_get_stock
+from .hotmail import _outlook_fetch_otp, _outlook_get_known_ids, get_last_mail_error as get_hotmail_last_mail_error
+from .hotmail import hotmail007_get_balance, hotmail007_get_mail, hotmail007_get_stock
+from .hotmail import is_retryable_mail_error as is_hotmail_retryable_mail_error
 from .hotmail import delete_temp_email as delete_hotmail_temp_email
 from .hotmail import get_email_and_token as get_hotmail_email_and_token
 from .hotmail import get_local_email_and_token as get_local_outlook_email_and_token
@@ -46,6 +48,19 @@ def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = No
     if ctx.EMAIL_MODE == "luckmail":
         return get_luckmail_oai_code(email=email, proxies=proxies, seen_ids=seen_ids)
     return get_cf_oai_code(email=email, proxies=proxies, seen_ids=seen_ids)
+
+
+def get_last_mail_error(email: str) -> str:
+    if ctx.EMAIL_MODE in {"hotmail007", "local_outlook"}:
+        return get_hotmail_last_mail_error(email)
+    return ""
+
+
+def should_retry_mail_fetch_without_resend(email: str) -> bool:
+    reason = get_last_mail_error(email)
+    if ctx.EMAIL_MODE in {"hotmail007", "local_outlook"}:
+        return is_hotmail_retryable_mail_error(reason)
+    return False
 
 
 def delete_temp_email(email: str, proxies: Any = None) -> None:

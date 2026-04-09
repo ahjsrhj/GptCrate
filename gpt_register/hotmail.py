@@ -12,6 +12,7 @@ from .cf_mail import extract_otp_code
 from .ui import rich_print as print
 
 _TIMEOUT_RETRY_LIMIT = 3
+_MAIL_ACCESS_RETRY_LIMIT = 3
 
 
 def _resolve_outlook_mail_mode(preferred: str | None = None) -> str:
@@ -31,6 +32,41 @@ def _is_timeout_error(error: Any) -> bool:
         "connection timed out",
     ]
     return any(marker in text for marker in timeout_markers)
+
+
+def _normalize_mail_error(error: Any) -> str:
+    return re.sub(r"\s+", " ", str(error or "")).strip()[:180]
+
+
+def _is_retryable_mail_access_error(reason: Any) -> bool:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    if text.startswith("mail_access_retryable:"):
+        return True
+    if _is_timeout_error(text):
+        return True
+    retryable_markers = [
+        "http 408",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "http_408",
+        "http_429",
+        "http_500",
+        "http_502",
+        "http_503",
+        "http_504",
+        "service unavailable",
+        "temporarily unavailable",
+        "too many requests",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+    ]
+    return any(marker in text for marker in retryable_markers)
 
 
 def _local_outlook_account_to_line(account: dict) -> str:
@@ -66,10 +102,17 @@ def _should_record_local_outlook_bad_account(reason: str) -> bool:
     if not text:
         return False
     transient_markers = [
+        "mail_access_retryable:",
         "could not resolve host",
         "failed to perform",
         "timed out",
         "timeout",
+        "http 408",
+        "http 429",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
         "proxy",
         "connection reset",
         "connection refused",
@@ -103,6 +146,15 @@ def _set_mail_error(email_addr: str, reason: str | None) -> None:
         creds["last_mail_error"] = reason
     else:
         creds.pop("last_mail_error", None)
+
+
+def get_last_mail_error(email_addr: str) -> str:
+    creds = ctx._hotmail007_credentials.get(email_addr, {})
+    return str(creds.get("last_mail_error") or "").strip()
+
+
+def is_retryable_mail_error(reason: Any) -> bool:
+    return _is_retryable_mail_access_error(reason)
 
 
 def _hotmail007_api_get(path: str, proxies: Any = None, **params) -> dict:
@@ -280,8 +332,14 @@ def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = N
     raise Exception(f"IMAP 所有方法均失败: {last_err[:200]}")
 
 
-def _outlook_graph_get_openai_messages(access_token: str, proxies: Any = None, top: int = 10) -> list:
+def _outlook_graph_get_openai_messages_detailed(
+    access_token: str,
+    proxies: Any = None,
+    top: int = 10,
+) -> tuple[list, str, bool]:
     all_items = []
+    fetch_errors = []
+    had_success_response = False
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
     params = {
         "$select": "id,subject,body,from,receivedDateTime",
@@ -300,9 +358,12 @@ def _outlook_graph_get_openai_messages(access_token: str, proxies: Any = None, t
                 impersonate="safari",
             )
             if response.status_code == 200:
+                had_success_response = True
                 all_items.extend(response.json().get("value", []))
-        except Exception:
-            pass
+            else:
+                fetch_errors.append(f"{folder}:HTTP {response.status_code}")
+        except Exception as exc:
+            fetch_errors.append(f"{folder}:{_normalize_mail_error(exc)}")
     if not all_items:
         try:
             response = requests.get(
@@ -315,13 +376,25 @@ def _outlook_graph_get_openai_messages(access_token: str, proxies: Any = None, t
                 impersonate="safari",
             )
             if response.status_code == 200:
+                had_success_response = True
                 all_items = response.json().get("value", [])
-        except Exception:
-            pass
+            else:
+                fetch_errors.append(f"all:HTTP {response.status_code}")
+        except Exception as exc:
+            fetch_errors.append(f"all:{_normalize_mail_error(exc)}")
+    unique_errors = []
+    for item in fetch_errors:
+        if item and item not in unique_errors:
+            unique_errors.append(item)
     return [
         item for item in all_items
         if "openai.com" in (item.get("from") or {}).get("emailAddress", {}).get("address", "").lower()
-    ]
+    ], "; ".join(unique_errors[:3]), had_success_response
+
+
+def _outlook_graph_get_openai_messages(access_token: str, proxies: Any = None, top: int = 10) -> list:
+    messages, _, _ = _outlook_graph_get_openai_messages_detailed(access_token, proxies=proxies, top=top)
+    return messages
 
 
 def _outlook_graph_extract_otp(message: dict) -> str:
@@ -357,12 +430,35 @@ def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str
         return ""
 
     debug_done = False
+    access_retry_count = 0
+    last_access_error = ""
+    had_successful_mail_fetch = False
     print(f"[Graph] 轮询收件箱(最多{timeout}s, 已知{len(known_ids)}封)...", end="", flush=True)
     start = time.time()
     while time.time() - start < timeout:
         print(".", end="", flush=True)
         try:
-            messages = _outlook_graph_get_openai_messages(access_token, proxies)
+            messages, fetch_error, has_success_response = _outlook_graph_get_openai_messages_detailed(access_token, proxies)
+            if has_success_response:
+                had_successful_mail_fetch = True
+                access_retry_count = 0
+            elif fetch_error:
+                last_access_error = fetch_error
+                if _is_retryable_mail_access_error(fetch_error):
+                    access_retry_count += 1
+                    print(
+                        f"\n[Graph] 邮箱访问异常，准备重新访问 ({access_retry_count}/{_MAIL_ACCESS_RETRY_LIMIT}): "
+                        f"{fetch_error[:120]}",
+                        end="",
+                        flush=True,
+                    )
+                    if access_retry_count >= _MAIL_ACCESS_RETRY_LIMIT:
+                        _set_mail_error(email_addr, f"mail_access_retryable:{_normalize_mail_error(fetch_error)}")
+                        print("\n[Graph] 邮箱访问连续失败，本轮先结束，交给上层重试", end="", flush=True)
+                        return ""
+                else:
+                    access_retry_count = 0
+                    print(f"\n[Graph] 邮箱访问异常: {fetch_error[:120]}", end="", flush=True)
             if not debug_done:
                 debug_done = True
                 headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
@@ -397,9 +493,30 @@ def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str
                     print(f" 抓到啦! 验证码: {code}")
                     return code
         except Exception as exc:
-            print(f"\n[Graph] 轮询出错: {exc}", end="", flush=True)
+            last_access_error = _normalize_mail_error(exc)
+            if _is_retryable_mail_access_error(last_access_error):
+                access_retry_count += 1
+                print(
+                    f"\n[Graph] 轮询出错，准备重新访问 ({access_retry_count}/{_MAIL_ACCESS_RETRY_LIMIT}): "
+                    f"{last_access_error[:120]}",
+                    end="",
+                    flush=True,
+                )
+                if access_retry_count >= _MAIL_ACCESS_RETRY_LIMIT:
+                    _set_mail_error(email_addr, f"mail_access_retryable:{last_access_error}")
+                    print("\n[Graph] 邮箱访问连续失败，本轮先结束，交给上层重试", end="", flush=True)
+                    return ""
+            else:
+                access_retry_count = 0
+                print(f"\n[Graph] 轮询出错: {exc}", end="", flush=True)
         time.sleep(3)
-    _set_mail_error(email_addr, "otp_timeout")
+    if not had_successful_mail_fetch and last_access_error:
+        if _is_retryable_mail_access_error(last_access_error):
+            _set_mail_error(email_addr, f"mail_access_retryable:{_normalize_mail_error(last_access_error)}")
+        else:
+            _set_mail_error(email_addr, f"mail_access_error:{_normalize_mail_error(last_access_error)}")
+    else:
+        _set_mail_error(email_addr, "otp_timeout")
     print(" 超时，未收到验证码")
     return ""
 
@@ -418,6 +535,8 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
 
     print(f"[IMAP] 轮询收件箱(最多{timeout}s, 已知{len(known_ids)}封)...", end="", flush=True)
     start = time.time()
+    had_successful_mail_fetch = False
+    last_access_error = ""
     while time.time() - start < timeout:
         print(".", end="", flush=True)
         try:
@@ -426,6 +545,7 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
             imap.authenticate("XOAUTH2", lambda _: auth_str.encode("utf-8"))
             try:
                 imap.select("INBOX")
+                had_successful_mail_fetch = True
                 status, msg_ids = imap.search(None, '(FROM "noreply@tm.openai.com")')
                 if status != "OK" or not msg_ids[0]:
                     status, msg_ids = imap.search(None, '(FROM "openai.com")')
@@ -460,6 +580,7 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
                 except Exception:
                     pass
         except Exception as exc:
+            last_access_error = _normalize_mail_error(exc)
             err_str = str(exc)
             print(f"\n[IMAP] 轮询出错: {exc}", end="", flush=True)
             if "not connected" in err_str.lower() or "authenticated but not connected" in err_str.lower():
@@ -470,7 +591,13 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
                 except Exception:
                     pass
         time.sleep(3)
-    _set_mail_error(email_addr, "otp_timeout")
+    if not had_successful_mail_fetch and last_access_error:
+        if _is_retryable_mail_access_error(last_access_error):
+            _set_mail_error(email_addr, f"mail_access_retryable:{_normalize_mail_error(last_access_error)}")
+        else:
+            _set_mail_error(email_addr, f"mail_access_error:{_normalize_mail_error(last_access_error)}")
+    else:
+        _set_mail_error(email_addr, "otp_timeout")
     print(" 超时，未收到验证码")
     return ""
 

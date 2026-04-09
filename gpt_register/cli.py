@@ -138,6 +138,28 @@ def _disable_email_on_failure(email: str, tag: str = "") -> None:
         except Exception as e:
             _safe_print(f"{tag} [Warning] 查找并禁用邮箱时出错: {email}, {e}")
 
+
+def _append_hotmail007_email_credentials(account_email: str, output_dir: str) -> None:
+    if ctx.EMAIL_MODE != "hotmail007" or not account_email:
+        return
+
+    creds = ctx._hotmail007_credentials.get(account_email) or {}
+    ms_password = str(creds.get("ms_password") or "").strip()
+    client_id = str(creds.get("client_id") or "").strip()
+    refresh_token = str(creds.get("refresh_token") or "").strip()
+
+    if not all([ms_password, client_id, refresh_token]):
+        _safe_print(f"[Warning] Hotmail007 邮箱凭据不完整，跳过写入 emails.txt: {account_email}")
+        return
+
+    emails_file = os.path.join(output_dir, "emails.txt")
+    with ctx._file_write_lock:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(emails_file, "a", encoding="utf-8") as ef:
+            ef.write(f"{account_email}----{ms_password}----{client_id}----{refresh_token}\n")
+    _safe_print(f"[*] Hotmail007 邮箱凭据已追加至: {emails_file}")
+
+
 def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> None:
     """线程安全地保存注册结果"""
     try:
@@ -186,11 +208,13 @@ def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> No
 
     if account_email and password:
         accounts_file = os.path.join(ctx.TOKEN_OUTPUT_DIR, "accounts.txt") if ctx.TOKEN_OUTPUT_DIR else "./tokens/accounts.txt"
+        output_dir = os.path.dirname(accounts_file) or "."
         with ctx._file_write_lock:
-            os.makedirs(os.path.dirname(accounts_file), exist_ok=True)
+            os.makedirs(output_dir, exist_ok=True)
             with open(accounts_file, "a", encoding="utf-8") as af:
                 af.write(f"{account_email}----{password}\n")
         _safe_print(f"[*] 账号密码已追加至: {accounts_file}")
+        _append_hotmail007_email_credentials(account_email, output_dir)
 
     if t_data:
         try:

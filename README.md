@@ -206,6 +206,8 @@ HOTMAIL007_MAX_RETRY=3
 ```
 
 `HOTMAIL007_MAIL_MODE` 支持 `graph` (Microsoft Graph API) 和 `imap` (IMAP 协议) 两种收信方式。
+- Hotmail007 模式注册成功后，除了写入 `tokens/accounts.txt`，还会额外写入 `tokens/emails.txt`
+- `tokens/emails.txt` 每行格式为 `邮箱----邮箱密码----client_id----refresh_token`
 
 **LuckMail 模式配置（推荐）：**
 
@@ -523,6 +525,7 @@ uv run python gpt.py --count 1 --threads 1
 | `token_xxx@xxx_时间戳.json` | 注册成功的 Token JSON (含 access_token / refresh_token / email 等) |
 | `accounts.txt`              | 输入账号文件；`file` 或 `local_outlook` 模式会读取它               |
 | `tokens/accounts.txt`       | 所有成功注册的账号密码，格式: `邮箱----密码`                       |
+| `tokens/emails.txt`         | Hotmail007 成功注册时导出的邮箱凭据，格式: `邮箱----邮箱密码----client_id----refresh_token` |
 | `bad_local_outlook.txt`     | 本地 Outlook 模式失效账号记录                                      |
 
 ---

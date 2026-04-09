@@ -73,6 +73,54 @@ class RegisterFlowTests(unittest.TestCase):
         self.assertEqual(post_mock.call_count, 4)
         self.assertEqual(sleep_mock.call_count, 3)
 
+    def test_collect_email_otp_retries_mailbox_access_before_resending(self):
+        session = mock.Mock()
+
+        with mock.patch.object(register.mail, "get_oai_code", side_effect=["", "", "", "", "123456"]) as get_code_mock, \
+             mock.patch.object(
+                 register.mail,
+                 "get_last_mail_error",
+                 side_effect=["mail_access_retryable:inbox:HTTP 503"] * 4,
+             ), \
+             mock.patch.object(register.mail, "should_retry_mail_fetch_without_resend", return_value=True), \
+             mock.patch.object(register.oauth, "_post_with_retry", return_value=mock.Mock(status_code=200)) as resend_mock, \
+             mock.patch.object(register.time, "sleep") as sleep_mock:
+            code = register._collect_email_otp(
+                session,
+                sentinel="sentinel-token",
+                dev_token="dev-token",
+                email="user@example.com",
+            )
+
+        self.assertEqual(code, "123456")
+        self.assertEqual(get_code_mock.call_count, 5)
+        resend_mock.assert_called_once()
+        self.assertEqual(
+            resend_mock.call_args.args[1],
+            "https://auth.openai.com/api/accounts/email-otp/resend",
+        )
+        self.assertEqual(sleep_mock.call_count, 4)
+
+    def test_collect_email_otp_plain_timeout_resends_immediately(self):
+        session = mock.Mock()
+
+        with mock.patch.object(register.mail, "get_oai_code", side_effect=["", "654321"]) as get_code_mock, \
+             mock.patch.object(register.mail, "get_last_mail_error", return_value="otp_timeout"), \
+             mock.patch.object(register.mail, "should_retry_mail_fetch_without_resend", return_value=False), \
+             mock.patch.object(register.oauth, "_post_with_retry", return_value=mock.Mock(status_code=200)) as resend_mock, \
+             mock.patch.object(register.time, "sleep") as sleep_mock:
+            code = register._collect_email_otp(
+                session,
+                sentinel="sentinel-token",
+                dev_token="dev-token",
+                email="user@example.com",
+            )
+
+        self.assertEqual(code, "654321")
+        self.assertEqual(get_code_mock.call_count, 2)
+        resend_mock.assert_called_once()
+        self.assertEqual(sleep_mock.call_count, 1)
+
     def test_initial_device_id_failure_switches_proxy_and_returns_new_proxy(self):
         class FakeCookies(dict):
             pass
@@ -220,10 +268,10 @@ class RegisterFlowTests(unittest.TestCase):
         self.assertEqual(resin_state.current_account, "reset99")
         self.assertEqual(sleep_mock.call_count, 1)
 
-    def test_run_switches_from_startup_account_to_email_account_before_network_check(self):
+    def test_run_falls_back_to_startup_account_after_email_proxy_network_failure(self):
         ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
         ctx.RESIN_PLATFORM_NAME = "reg"
-        observed = {}
+        observed = {"network_proxies": []}
 
         def fake_get_email_and_token(proxies):
             observed["provider_proxy"] = proxies["http"]
@@ -231,10 +279,61 @@ class RegisterFlowTests(unittest.TestCase):
 
         def fake_check_network_ready(session, proxies=None):
             del session
-            observed["network_proxy"] = (proxies or {}).get("http")
+            observed["network_proxies"].append((proxies or {}).get("http"))
+            return len(observed["network_proxies"]) > 1
+
+        def fake_bootstrap(auth_url, proxy, get_next_proxy=None, resin_state=None, network_checked=False):
+            del auth_url, get_next_proxy, network_checked
+            observed["bootstrap_proxy"] = ctx.build_proxy_url(proxy, resin_state=resin_state)
+            return mock.Mock(), proxy, ctx.build_proxies(proxy, resin_state=resin_state), "did-ok", "sentinel-ok"
+
+        failed_signup_resp = mock.Mock(status_code=500, text="bad request")
+
+        with mock.patch.object(register.ctx, "_generate_resin_account", side_effect=["start01", "reset99"]), \
+             mock.patch.object(register.mail, "get_email_and_token", side_effect=fake_get_email_and_token), \
+             mock.patch.object(register, "_check_network_ready", side_effect=fake_check_network_ready), \
+             mock.patch.object(register, "_bootstrap_initial_device_with_proxy_refresh", side_effect=fake_bootstrap), \
+             mock.patch.object(register, "_call_with_timeout_retry", return_value=failed_signup_resp):
+            result = register.run(None)
+
+        self.assertEqual(
+            observed["provider_proxy"],
+            "http://reg.start01:my-token@127.0.0.1:2260",
+        )
+        self.assertEqual(
+            observed["network_proxies"][0],
+            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+        )
+        self.assertEqual(
+            observed["network_proxies"][1],
+            "http://reg.reset99:my-token@127.0.0.1:2260",
+        )
+        self.assertEqual(
+            observed["bootstrap_proxy"],
+            "http://reg.reset99:my-token@127.0.0.1:2260",
+        )
+        self.assertEqual(result[3], "signup_form_error")
+        self.assertEqual(result[4], "http://reg.reset99:my-token@127.0.0.1:2260")
+
+    def test_run_stops_after_five_resin_proxy_retries_on_network_failure(self):
+        ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
+        ctx.RESIN_PLATFORM_NAME = "reg"
+        observed = {"network_proxies": []}
+
+        def fake_get_email_and_token(proxies):
+            observed["provider_proxy"] = proxies["http"]
+            return "user@example.com", "dev-token"
+
+        def fake_check_network_ready(session, proxies=None):
+            del session
+            observed["network_proxies"].append((proxies or {}).get("http"))
             return False
 
-        with mock.patch.object(register.ctx, "_generate_resin_account", return_value="start01"), \
+        with mock.patch.object(
+            register.ctx,
+            "_generate_resin_account",
+            side_effect=["start01", "retry01", "retry02", "retry03", "retry04", "retry05"],
+        ), \
              mock.patch.object(register.mail, "get_email_and_token", side_effect=fake_get_email_and_token), \
              mock.patch.object(register, "_check_network_ready", side_effect=fake_check_network_ready):
             result = register.run(None)
@@ -244,13 +343,20 @@ class RegisterFlowTests(unittest.TestCase):
             "http://reg.start01:my-token@127.0.0.1:2260",
         )
         self.assertEqual(
-            observed["network_proxy"],
-            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+            observed["network_proxies"],
+            [
+                "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+                "http://reg.retry01:my-token@127.0.0.1:2260",
+                "http://reg.retry02:my-token@127.0.0.1:2260",
+                "http://reg.retry03:my-token@127.0.0.1:2260",
+                "http://reg.retry04:my-token@127.0.0.1:2260",
+                "http://reg.retry05:my-token@127.0.0.1:2260",
+            ],
         )
         self.assertEqual(result[3], "network_error")
         self.assertEqual(
             result[4],
-            "http://reg.user%40example.com:my-token@127.0.0.1:2260",
+            "http://reg.retry05:my-token@127.0.0.1:2260",
         )
 
 

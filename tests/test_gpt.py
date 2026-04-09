@@ -279,6 +279,122 @@ class GptMainTests(unittest.TestCase):
                 ctx.TOKEN_OUTPUT_DIR = original_output_dir
                 ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir
 
+    def test_save_result_writes_hotmail007_emails_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_json = (
+                '{"access_token":"access-token","refresh_token":"refresh-token",'
+                '"account_id":"acc-001","email":"user@example.com","type":"codex",'
+                '"expired":"2026-04-18T04:30:34Z"}'
+            )
+            original_output_dir = ctx.TOKEN_OUTPUT_DIR
+            original_proxy_auths_dir = ctx.CLI_PROXY_AUTHS_DIR
+            original_email_mode = ctx.EMAIL_MODE
+            original_hotmail007_credentials = dict(ctx._hotmail007_credentials)
+
+            try:
+                ctx.TOKEN_OUTPUT_DIR = temp_dir
+                ctx.CLI_PROXY_AUTHS_DIR = ""
+                ctx.EMAIL_MODE = "hotmail007"
+                ctx._hotmail007_credentials.clear()
+                ctx._hotmail007_credentials["user@example.com"] = {
+                    "ms_password": "mail-secret",
+                    "client_id": "client-id",
+                    "refresh_token": "refresh-token-2",
+                }
+                with mock.patch.object(cli.time, "time", return_value=1775622635), \
+                     mock.patch.object(cli.mail, "delete_temp_email") as delete_mock, \
+                     mock.patch.object(
+                         cli.codex2api,
+                         "upload_account",
+                         return_value={"attempted": True, "ok": True, "message": "成功添加 1 个账号"},
+                     ):
+                    cli._save_result(token_json, "secret-pass", None)
+
+                emails_path = os.path.join(temp_dir, "emails.txt")
+                with open(emails_path, "r", encoding="utf-8") as handle:
+                    self.assertEqual(
+                        handle.read(),
+                        "user@example.com----mail-secret----client-id----refresh-token-2\n",
+                    )
+                delete_mock.assert_called_once_with("user@example.com", proxies=None)
+            finally:
+                ctx.TOKEN_OUTPUT_DIR = original_output_dir
+                ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir
+                ctx.EMAIL_MODE = original_email_mode
+                ctx._hotmail007_credentials.clear()
+                ctx._hotmail007_credentials.update(original_hotmail007_credentials)
+
+    def test_save_result_does_not_write_emails_file_for_non_hotmail007(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_json = (
+                '{"access_token":"access-token","refresh_token":"refresh-token",'
+                '"account_id":"acc-001","email":"user@example.com","type":"codex",'
+                '"expired":"2026-04-18T04:30:34Z"}'
+            )
+            original_output_dir = ctx.TOKEN_OUTPUT_DIR
+            original_proxy_auths_dir = ctx.CLI_PROXY_AUTHS_DIR
+            original_email_mode = ctx.EMAIL_MODE
+
+            try:
+                ctx.TOKEN_OUTPUT_DIR = temp_dir
+                ctx.CLI_PROXY_AUTHS_DIR = ""
+                ctx.EMAIL_MODE = "cf"
+                with mock.patch.object(cli.time, "time", return_value=1775622635), \
+                     mock.patch.object(cli.mail, "delete_temp_email"), \
+                     mock.patch.object(
+                         cli.codex2api,
+                         "upload_account",
+                         return_value={"attempted": True, "ok": True, "message": "成功添加 1 个账号"},
+                     ):
+                    cli._save_result(token_json, "secret-pass", None)
+
+                self.assertFalse(os.path.exists(os.path.join(temp_dir, "emails.txt")))
+            finally:
+                ctx.TOKEN_OUTPUT_DIR = original_output_dir
+                ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir
+                ctx.EMAIL_MODE = original_email_mode
+
+    def test_save_result_skips_hotmail007_emails_file_when_credentials_incomplete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_json = (
+                '{"access_token":"access-token","refresh_token":"refresh-token",'
+                '"account_id":"acc-001","email":"user@example.com","type":"codex",'
+                '"expired":"2026-04-18T04:30:34Z"}'
+            )
+            original_output_dir = ctx.TOKEN_OUTPUT_DIR
+            original_proxy_auths_dir = ctx.CLI_PROXY_AUTHS_DIR
+            original_email_mode = ctx.EMAIL_MODE
+            original_hotmail007_credentials = dict(ctx._hotmail007_credentials)
+
+            try:
+                ctx.TOKEN_OUTPUT_DIR = temp_dir
+                ctx.CLI_PROXY_AUTHS_DIR = ""
+                ctx.EMAIL_MODE = "hotmail007"
+                ctx._hotmail007_credentials.clear()
+                ctx._hotmail007_credentials["user@example.com"] = {
+                    "ms_password": "mail-secret",
+                    "client_id": "",
+                    "refresh_token": "refresh-token-2",
+                }
+                with mock.patch.object(cli.time, "time", return_value=1775622635), \
+                     mock.patch.object(cli.mail, "delete_temp_email"), \
+                     mock.patch.object(
+                         cli.codex2api,
+                         "upload_account",
+                         return_value={"attempted": True, "ok": True, "message": "成功添加 1 个账号"},
+                     ), \
+                     mock.patch.object(cli, "_safe_print") as print_mock:
+                    cli._save_result(token_json, "secret-pass", None)
+
+                self.assertFalse(os.path.exists(os.path.join(temp_dir, "emails.txt")))
+                print_mock.assert_any_call("[Warning] Hotmail007 邮箱凭据不完整，跳过写入 emails.txt: user@example.com")
+            finally:
+                ctx.TOKEN_OUTPUT_DIR = original_output_dir
+                ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir
+                ctx.EMAIL_MODE = original_email_mode
+                ctx._hotmail007_credentials.clear()
+                ctx._hotmail007_credentials.update(original_hotmail007_credentials)
+
     def test_save_result_keeps_local_files_when_codex2api_upload_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             token_json = (
