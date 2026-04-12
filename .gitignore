@@ -32,6 +32,7 @@ auths/
 account.txt
 accounts.txt
 bad_local_outlook.txt
+proxies.txt
 
 # OS
 .DS_Store
