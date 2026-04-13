@@ -144,10 +144,11 @@ def request_get_mail(
         mail_type=mail_type,
         quantity=quantity,
     )
+    resolved_proxies = ctx.resolve_outlook_proxies(proxies)
     try:
         response = requests.get(
             url,
-            proxies=proxies,
+            proxies=resolved_proxies,
             verify=ctx._ssl_verify(),
             timeout=timeout,
             impersonate="safari",
@@ -231,7 +232,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--quantity", type=int, default=1, help="拉取数量，默认 1")
     parser.add_argument("--timeout", type=float, default=15.0, help="单次请求超时时间，默认 15 秒")
-    parser.add_argument("--proxy", default=ctx.SINGLE_PROXY or None, help="单代理地址，默认读取 PROXY")
+    parser.add_argument(
+        "--proxy",
+        default=ctx.OUTLOOK_PROXY or ctx.SINGLE_PROXY or None,
+        help="单代理地址，默认优先读取 OUTLOOK_PROXY，其次 PROXY",
+    )
     return parser.parse_args()
 
 
@@ -245,7 +250,7 @@ def main() -> int:
         print("--quantity 必须大于 0。", file=sys.stderr)
         return 1
 
-    use_resin_proxy = ctx.is_resin_enabled() and not args.proxy
+    use_resin_proxy = ctx.is_resin_enabled() and not args.proxy and not ctx.OUTLOOK_PROXY
     runtime_resin_state = ctx.ResinRunState() if use_resin_proxy else None
     if use_resin_proxy:
         try:

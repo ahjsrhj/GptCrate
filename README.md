@@ -210,6 +210,8 @@ EMAIL_MODE=local_outlook
 ACCOUNTS_FILE=accounts.txt
 LOCAL_OUTLOOK_MAIL_MODE=graph
 LOCAL_OUTLOOK_BAD_FILE=bad_local_outlook.txt
+# 可选：仅 Outlook/Hotmail 相关 HTTP 请求走这个代理
+OUTLOOK_PROXY=http://127.0.0.1:7890
 ```
 
 `accounts.txt` 每行格式：
@@ -222,6 +224,7 @@ LOCAL_OUTLOOK_BAD_FILE=bad_local_outlook.txt
 - 失效账号会自动写入 `LOCAL_OUTLOOK_BAD_FILE`
 - 程序读取的是**项目根目录**下的 `accounts.txt`
 - 成功注册后写入的是 `tokens/accounts.txt`，两者不是同一个文件
+- 如配置 `OUTLOOK_PROXY`，Microsoft Graph / OAuth 等 Outlook 相关 HTTP 请求会优先走这个代理
 
 **Hotmail007 模式配置：**
 
@@ -235,6 +238,8 @@ HOTMAIL007_MAIL_MODE=imap
 HOTMAIL007_ALIAS_SPLIT_ENABLED=false
 # 拉取邮箱失败时的最大重试次数
 HOTMAIL007_MAX_RETRY=3
+# 可选：仅 Hotmail007 / Outlook 相关 HTTP 请求走这个代理
+OUTLOOK_PROXY=http://127.0.0.1:7890
 ```
 
 `HOTMAIL007_MAIL_MODE` 支持 `graph` (Microsoft Graph API) 和 `imap` (IMAP 协议) 两种收信方式。
@@ -242,6 +247,7 @@ HOTMAIL007_MAX_RETRY=3
 - 开启裂变后，注册流程消费的是别名邮箱，验证码仍通过对应原始邮箱的微软 OAuth 凭据轮询获取
 - Hotmail007 模式注册成功后，除了写入 `tokens/accounts.txt`，还会额外写入 `tokens/emails.txt`
 - `tokens/emails.txt` 每行格式为 `原始邮箱----邮箱密码----client_id----refresh_token`
+- 如配置 `OUTLOOK_PROXY`，Hotmail007 的余额/库存/购买查询和 Outlook Graph / OAuth 请求会优先走这个代理
 
 **LuckMail 模式配置（推荐）：**
 
@@ -304,6 +310,15 @@ LUCKMAIL_MAX_RETRY=3
    - 用完后直接停止，不购买新邮箱
 
 ### 代理配置
+
+如果你希望把 Outlook 邮箱相关 HTTP 请求单独走一条代理，可额外配置：
+
+```env
+OUTLOOK_PROXY=http://127.0.0.1:7890
+```
+
+- 仅影响 Hotmail007 查询/购买、Microsoft Graph 收信、Microsoft OAuth 刷新等 Outlook 相关 HTTP 请求
+- 未配置时，这些请求会继续复用下面的通用代理链
 
 代理优先级：
 

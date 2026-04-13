@@ -211,6 +211,7 @@ def generate_env(
         "RESIN_URL": _env_or_default("RESIN_URL"),
         "RESIN_PLATFORM_NAME": _env_or_default("RESIN_PLATFORM_NAME"),
         "PROXY_FILE": _env_or_default("PROXY_FILE", "proxies.txt"),
+        "OUTLOOK_PROXY": _env_or_default("OUTLOOK_PROXY"),
         "ACCOUNTS_FILE": _env_or_default("ACCOUNTS_FILE", "accounts.txt"),
         "HOTMAIL007_API_URL": _env_or_default("HOTMAIL007_API_URL", "https://gapi.hotmail007.com"),
         "HOTMAIL007_API_KEY": _env_or_default("HOTMAIL007_API_KEY"),
@@ -254,6 +255,7 @@ RESIN_URL={values['RESIN_URL']}
 RESIN_PLATFORM_NAME={values['RESIN_PLATFORM_NAME']}
 
 PROXY_FILE={values['PROXY_FILE']}
+OUTLOOK_PROXY={values['OUTLOOK_PROXY']}
 
 # 批量注册配置
 {batch_count_line}

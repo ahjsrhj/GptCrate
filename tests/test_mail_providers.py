@@ -18,6 +18,7 @@ class MailProviderTests(unittest.TestCase):
             "LOCAL_OUTLOOK_BAD_FILE": ctx.LOCAL_OUTLOOK_BAD_FILE,
             "LUCKMAIL_API_KEY": ctx.LUCKMAIL_API_KEY,
             "HOTMAIL007_API_KEY": ctx.HOTMAIL007_API_KEY,
+            "OUTLOOK_PROXY": ctx.OUTLOOK_PROXY,
             "HOTMAIL007_ALIAS_SPLIT_ENABLED": ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED,
             "HOTMAIL007_MAX_RETRY": ctx.HOTMAIL007_MAX_RETRY,
             "_email_queue": ctx._email_queue,
@@ -42,6 +43,7 @@ class MailProviderTests(unittest.TestCase):
         ctx.LOCAL_OUTLOOK_BAD_FILE = self._original["LOCAL_OUTLOOK_BAD_FILE"]
         ctx.LUCKMAIL_API_KEY = self._original["LUCKMAIL_API_KEY"]
         ctx.HOTMAIL007_API_KEY = self._original["HOTMAIL007_API_KEY"]
+        ctx.OUTLOOK_PROXY = self._original["OUTLOOK_PROXY"]
         ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = self._original["HOTMAIL007_ALIAS_SPLIT_ENABLED"]
         ctx.HOTMAIL007_MAX_RETRY = self._original["HOTMAIL007_MAX_RETRY"]
         ctx._email_queue = self._original["_email_queue"]
@@ -236,6 +238,45 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual((email, token), ("retry@example.com", "retry@example.com"))
         self.assertEqual(get_mail_mock.call_count, 3)
         sleep_mock.assert_not_called()
+
+    def test_hotmail007_api_get_prefers_outlook_proxy(self):
+        ctx.OUTLOOK_PROXY = "http://mail-proxy:7890"
+        response = mock.Mock()
+        response.json.return_value = {"success": True, "code": 0, "data": 10}
+
+        with mock.patch.object(hotmail.requests, "get", return_value=response) as get_mock:
+            hotmail.hotmail007_get_balance(
+                proxies={"http": "http://general-proxy:8080", "https": "http://general-proxy:8080"}
+            )
+
+        self.assertEqual(
+            get_mock.call_args.kwargs["proxies"],
+            {
+                "http": "http://mail-proxy:7890",
+                "https": "http://mail-proxy:7890",
+            },
+        )
+
+    def test_outlook_graph_token_prefers_outlook_proxy(self):
+        ctx.OUTLOOK_PROXY = "http://mail-proxy:7890"
+        response = mock.Mock()
+        response.json.return_value = {"access_token": "graph-token"}
+
+        with mock.patch.object(hotmail.requests, "post", return_value=response) as post_mock:
+            token = hotmail._outlook_get_graph_token(
+                "client-id",
+                "refresh-token",
+                proxies={"http": "http://general-proxy:8080", "https": "http://general-proxy:8080"},
+            )
+
+        self.assertEqual(token, "graph-token")
+        self.assertEqual(
+            post_mock.call_args.kwargs["proxies"],
+            {
+                "http": "http://mail-proxy:7890",
+                "https": "http://mail-proxy:7890",
+            },
+        )
 
     def test_hotmail007_buy_error_retries_until_success(self):
         ctx.EMAIL_MODE = "hotmail007"

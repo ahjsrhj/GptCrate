@@ -8,11 +8,13 @@ class ResinContextTests(unittest.TestCase):
     def setUp(self):
         self._original_resin_url = ctx.RESIN_URL
         self._original_resin_platform_name = ctx.RESIN_PLATFORM_NAME
+        self._original_outlook_proxy = ctx.OUTLOOK_PROXY
         self._original_log_thread_id = ctx.get_log_thread_id()
 
     def tearDown(self):
         ctx.RESIN_URL = self._original_resin_url
         ctx.RESIN_PLATFORM_NAME = self._original_resin_platform_name
+        ctx.OUTLOOK_PROXY = self._original_outlook_proxy
         if self._original_log_thread_id is None:
             ctx.clear_log_thread_id()
         else:
@@ -99,6 +101,32 @@ class ResinContextTests(unittest.TestCase):
         self.assertEqual(ctx.get_resin_startup_account(resin_state=state_one), "aaa111")
         self.assertEqual(ctx.get_resin_startup_account(resin_state=state_two), "bbb222")
         self.assertNotEqual(state_one.startup_account, state_two.startup_account)
+
+    def test_resolve_outlook_proxies_prefers_dedicated_proxy(self):
+        ctx.OUTLOOK_PROXY = "http://mail-proxy:7890"
+
+        proxies = ctx.resolve_outlook_proxies(
+            {"http": "http://general-proxy:8080", "https": "http://general-proxy:8080"}
+        )
+
+        self.assertEqual(
+            proxies,
+            {
+                "http": "http://mail-proxy:7890",
+                "https": "http://mail-proxy:7890",
+            },
+        )
+
+    def test_resolve_outlook_proxies_falls_back_to_existing_proxies(self):
+        ctx.OUTLOOK_PROXY = ""
+        general_proxies = {
+            "http": "http://general-proxy:8080",
+            "https": "http://general-proxy:8080",
+        }
+
+        proxies = ctx.resolve_outlook_proxies(general_proxies)
+
+        self.assertEqual(proxies, general_proxies)
 
 
 if __name__ == "__main__":

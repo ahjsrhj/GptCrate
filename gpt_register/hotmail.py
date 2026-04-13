@@ -174,8 +174,15 @@ def _hotmail007_api_get(path: str, proxies: Any = None, **params) -> dict:
             f"{key}={urllib.parse.quote(str(value))}" for key, value in params.items() if value
         )
         url = f"{url}?{qs}"
+    resolved_proxies = ctx.resolve_outlook_proxies(proxies)
     try:
-        response = requests.get(url, proxies=proxies, verify=ctx._ssl_verify(), timeout=15, impersonate="safari")
+        response = requests.get(
+            url,
+            proxies=resolved_proxies,
+            verify=ctx._ssl_verify(),
+            timeout=15,
+            impersonate="safari",
+        )
         return response.json()
     except Exception as exc:
         if _is_user_cancelled_request_error(exc):
@@ -332,6 +339,7 @@ def _pop_hotmail007_queue_account(proxies: Any = None) -> tuple[dict | None, int
 
 
 def _outlook_get_graph_token(client_id: str, refresh_token: str, proxies: Any = None) -> str:
+    resolved_proxies = ctx.resolve_outlook_proxies(proxies)
     response = requests.post(
         "https://login.microsoftonline.com/common/oauth2/v2.0/token",
         data={
@@ -341,7 +349,7 @@ def _outlook_get_graph_token(client_id: str, refresh_token: str, proxies: Any = 
             "scope": "https://graph.microsoft.com/.default",
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
-        proxies=proxies,
+        proxies=resolved_proxies,
         verify=ctx._ssl_verify(),
         timeout=30,
         impersonate="safari",
@@ -358,6 +366,7 @@ def _outlook_get_graph_token(client_id: str, refresh_token: str, proxies: Any = 
 def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = None, email_addr: str = "") -> tuple:
     import imaplib as _imaplib
 
+    resolved_proxies = ctx.resolve_outlook_proxies(proxies)
     methods = [
         {
             "url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
@@ -396,7 +405,7 @@ def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = N
                 method["url"],
                 data=method["data"],
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                proxies=proxies,
+                proxies=resolved_proxies,
                 verify=ctx._ssl_verify(),
                 timeout=30,
                 impersonate="safari",
@@ -440,6 +449,7 @@ def _outlook_graph_get_openai_messages_detailed(
     fetch_errors = []
     had_success_response = False
     headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    resolved_proxies = ctx.resolve_outlook_proxies(proxies)
     params = {
         "$select": "id,subject,body,from,receivedDateTime",
         "$orderby": "receivedDateTime desc",
@@ -451,7 +461,7 @@ def _outlook_graph_get_openai_messages_detailed(
                 f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages",
                 params=params,
                 headers=headers,
-                proxies=proxies,
+                proxies=resolved_proxies,
                 verify=ctx._ssl_verify(),
                 timeout=30,
                 impersonate="safari",
@@ -469,7 +479,7 @@ def _outlook_graph_get_openai_messages_detailed(
                 "https://graph.microsoft.com/v1.0/me/messages",
                 params=params,
                 headers=headers,
-                proxies=proxies,
+                proxies=resolved_proxies,
                 verify=ctx._ssl_verify(),
                 timeout=30,
                 impersonate="safari",
@@ -570,13 +580,14 @@ def _outlook_fetch_otp_graph(
             if not debug_done:
                 debug_done = True
                 headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+                resolved_proxies = ctx.resolve_outlook_proxies(proxies)
                 for folder in ["inbox", "junkemail"]:
                     try:
                         debug_response = requests.get(
                             f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages",
                             params={"$top": "3", "$select": "id,subject,from,receivedDateTime"},
                             headers=headers,
-                            proxies=proxies,
+                            proxies=resolved_proxies,
                             verify=ctx._ssl_verify(),
                             timeout=15,
                             impersonate="safari",

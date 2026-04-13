@@ -125,6 +125,23 @@ class StartPyTests(unittest.TestCase):
             self.assertIn("RESIN_URL=http://127.0.0.1:2260/my-token", content)
             self.assertIn("RESIN_PLATFORM_NAME=reg", content)
 
+    def test_generate_env_preserves_existing_outlook_proxy(self):
+        with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):
+            with open(".env", "w", encoding="utf-8") as handle:
+                handle.write("OUTLOOK_PROXY=http://127.0.0.1:7890\n")
+
+            start.generate_env(
+                platform="luckmail",
+                api_key="secret-key",
+                count=1,
+                threads=1,
+            )
+
+            with open(".env", "r", encoding="utf-8") as handle:
+                content = handle.read()
+
+            self.assertIn("OUTLOOK_PROXY=http://127.0.0.1:7890", content)
+
     def test_generate_env_supports_luckmail_own_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):
             start.generate_env(

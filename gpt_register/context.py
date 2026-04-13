@@ -45,6 +45,7 @@ RESIN_PLATFORM_NAME = os.getenv("RESIN_PLATFORM_NAME", "").strip()
 
 PROXY_FILE = os.getenv("PROXY_FILE", "").strip()
 SINGLE_PROXY = os.getenv("PROXY", "").strip()
+OUTLOOK_PROXY = os.getenv("OUTLOOK_PROXY", "").strip()
 BATCH_COUNT = os.getenv("BATCH_COUNT", "").strip()
 BATCH_THREADS = os.getenv("BATCH_THREADS", "").strip()
 
@@ -626,3 +627,17 @@ def build_proxies(
 ):
     proxy_url = build_proxy_url(proxy, account=account, resin_state=resin_state)
     return {"http": proxy_url, "https": proxy_url} if proxy_url else None
+
+
+def resolve_outlook_proxies(
+    proxies=None,
+    *,
+    proxy: Optional[str] = None,
+    account: Optional[str] = None,
+    resin_state: Optional[ResinRunState] = None,
+):
+    if OUTLOOK_PROXY:
+        return {"http": OUTLOOK_PROXY, "https": OUTLOOK_PROXY}
+    if proxies is not None:
+        return proxies
+    return build_proxies(proxy, account=account, resin_state=resin_state)

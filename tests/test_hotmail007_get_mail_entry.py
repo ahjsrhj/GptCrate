@@ -63,6 +63,32 @@ class Hotmail007GetMailEntryTests(unittest.TestCase):
             "?clientKey=key%20123&mailType=outlook%20premium&quantity=2",
         )
 
+    def test_request_get_mail_prefers_outlook_proxy(self):
+        with mock.patch.object(
+            hotmail007_get_mail.ctx,
+            "OUTLOOK_PROXY",
+            "http://mail-proxy:7890",
+        ), mock.patch.object(
+            hotmail007_get_mail.requests,
+            "get",
+            return_value=_FakeResponse({"success": True, "code": 0, "data": []}),
+        ) as get_mock:
+            hotmail007_get_mail.request_get_mail(
+                "https://gapi.hotmail007.com",
+                client_key="key",
+                mail_type="outlook",
+                quantity=1,
+                proxies={"http": "http://general-proxy:8080", "https": "http://general-proxy:8080"},
+            )
+
+        self.assertEqual(
+            get_mock.call_args.kwargs["proxies"],
+            {
+                "http": "http://mail-proxy:7890",
+                "https": "http://mail-proxy:7890",
+            },
+        )
+
     def test_fetch_get_mail_with_retry_retries_until_success(self):
         responses = [
             _FakeResponse({"success": False, "code": 500, "message": "temporary error"}),
