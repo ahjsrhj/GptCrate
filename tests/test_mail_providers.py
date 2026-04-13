@@ -18,9 +18,11 @@ class MailProviderTests(unittest.TestCase):
             "LOCAL_OUTLOOK_BAD_FILE": ctx.LOCAL_OUTLOOK_BAD_FILE,
             "LUCKMAIL_API_KEY": ctx.LUCKMAIL_API_KEY,
             "HOTMAIL007_API_KEY": ctx.HOTMAIL007_API_KEY,
+            "HOTMAIL007_ALIAS_SPLIT_ENABLED": ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED,
             "HOTMAIL007_MAX_RETRY": ctx.HOTMAIL007_MAX_RETRY,
             "_email_queue": ctx._email_queue,
             "_active_email_queue": ctx._active_email_queue,
+            "_hotmail007_queue": ctx._hotmail007_queue,
             "_luckmail_purchased_only": ctx._luckmail_purchased_only,
             "_luckmail_own_only": ctx._luckmail_own_only,
             "_hotmail007_credentials": dict(ctx._hotmail007_credentials),
@@ -28,6 +30,8 @@ class MailProviderTests(unittest.TestCase):
         }
         ctx._hotmail007_credentials.clear()
         ctx._luckmail_credentials.clear()
+        ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = False
+        ctx._hotmail007_queue = None
 
     def tearDown(self):
         ctx.EMAIL_MODE = self._original["EMAIL_MODE"]
@@ -38,9 +42,11 @@ class MailProviderTests(unittest.TestCase):
         ctx.LOCAL_OUTLOOK_BAD_FILE = self._original["LOCAL_OUTLOOK_BAD_FILE"]
         ctx.LUCKMAIL_API_KEY = self._original["LUCKMAIL_API_KEY"]
         ctx.HOTMAIL007_API_KEY = self._original["HOTMAIL007_API_KEY"]
+        ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = self._original["HOTMAIL007_ALIAS_SPLIT_ENABLED"]
         ctx.HOTMAIL007_MAX_RETRY = self._original["HOTMAIL007_MAX_RETRY"]
         ctx._email_queue = self._original["_email_queue"]
         ctx._active_email_queue = self._original["_active_email_queue"]
+        ctx._hotmail007_queue = self._original["_hotmail007_queue"]
         ctx._luckmail_purchased_only = self._original["_luckmail_purchased_only"]
         ctx._luckmail_own_only = self._original["_luckmail_own_only"]
         ctx._hotmail007_credentials.clear()
@@ -74,6 +80,107 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("user@example.com", "user@example.com"))
         self.assertEqual(ctx._hotmail007_credentials["user@example.com"]["known_ids"], {"known-id"})
+
+    def test_hotmail007_alias_split_reuses_queue_before_buying_next_account(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = True
+        first_mail = {
+            "email": "first@example.com",
+            "password": "secret-1",
+            "refresh_token": "refresh-1",
+            "client_id": "client-1",
+        }
+        second_mail = {
+            "email": "second@example.com",
+            "password": "secret-2",
+            "refresh_token": "refresh-2",
+            "client_id": "client-2",
+        }
+        first_aliases = [
+            "first+aaaaaa@example.com",
+            "first+bbbbbb@example.com",
+            "first+cccccc@example.com",
+            "first+dddddd@example.com",
+            "first+eeeeee@example.com",
+        ]
+        second_aliases = [
+            "second+fffffg@example.com",
+            "second+gggggh@example.com",
+            "second+hhhhhi@example.com",
+            "second+iiiiij@example.com",
+            "second+jjjjjk@example.com",
+        ]
+
+        with mock.patch.object(
+            hotmail,
+            "hotmail007_get_mail",
+            side_effect=[([first_mail], ""), ([second_mail], "")],
+        ) as get_mail_mock, \
+            mock.patch.object(
+                hotmail,
+                "expand_microsoft_alias_emails",
+                side_effect=[first_aliases, second_aliases],
+            ), \
+            mock.patch.object(
+                hotmail,
+                "_outlook_get_known_ids",
+                side_effect=[set() for _ in range(6)],
+            ):
+            emails = [mail.get_email_and_token()[0] for _ in range(6)]
+
+        self.assertEqual(
+            emails,
+            [
+                "first+aaaaaa@example.com",
+                "first+bbbbbb@example.com",
+                "first+cccccc@example.com",
+                "first+dddddd@example.com",
+                "first+eeeeee@example.com",
+                "second+fffffg@example.com",
+            ],
+        )
+        self.assertEqual(get_mail_mock.call_count, 2)
+        self.assertEqual(len(ctx._hotmail007_queue), 4)
+
+    def test_hotmail007_alias_split_refreshes_known_ids_for_each_dequeued_alias(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = True
+        fake_mail = {
+            "email": "primary@example.com",
+            "password": "secret",
+            "refresh_token": "refresh",
+            "client_id": "client",
+        }
+        aliases = [
+            "primary+aaaaaa@example.com",
+            "primary+bbbbbb@example.com",
+            "primary+cccccc@example.com",
+            "primary+dddddd@example.com",
+            "primary+eeeeee@example.com",
+        ]
+
+        with mock.patch.object(hotmail, "hotmail007_get_mail", return_value=([fake_mail], "")) as get_mail_mock, \
+             mock.patch.object(hotmail, "expand_microsoft_alias_emails", return_value=aliases), \
+             mock.patch.object(
+                 hotmail,
+                 "_outlook_get_known_ids",
+                 side_effect=[{"old-1"}, {"old-2"}],
+             ) as known_ids_mock:
+            first_email, _ = mail.get_email_and_token()
+            second_email, _ = mail.get_email_and_token()
+
+        self.assertEqual(first_email, "primary+aaaaaa@example.com")
+        self.assertEqual(second_email, "primary+bbbbbb@example.com")
+        self.assertEqual(get_mail_mock.call_count, 1)
+        self.assertEqual(known_ids_mock.call_count, 2)
+        self.assertEqual(known_ids_mock.call_args_list[0].args[0], "primary@example.com")
+        self.assertEqual(known_ids_mock.call_args_list[1].args[0], "primary@example.com")
+        self.assertEqual(ctx._hotmail007_credentials[first_email]["known_ids"], {"old-1"})
+        self.assertEqual(ctx._hotmail007_credentials[second_email]["known_ids"], {"old-2"})
 
     def test_hotmail007_api_get_raises_keyboard_interrupt_on_user_cancel(self):
         error = (
@@ -128,8 +235,7 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("retry@example.com", "retry@example.com"))
         self.assertEqual(get_mail_mock.call_count, 3)
-        self.assertEqual(sleep_mock.call_count, 2)
-        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1)])
+        sleep_mock.assert_not_called()
 
     def test_hotmail007_buy_error_retries_until_success(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -158,8 +264,7 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("buy-retry@example.com", "buy-retry@example.com"))
         self.assertEqual(get_mail_mock.call_count, 4)
-        self.assertEqual(sleep_mock.call_count, 3)
-        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1), mock.call(0.1)])
+        sleep_mock.assert_not_called()
 
     def test_hotmail007_timeout_retries_three_times_before_success(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -189,8 +294,7 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("timeout-retry@example.com", "timeout-retry@example.com"))
         self.assertEqual(get_mail_mock.call_count, 4)
-        self.assertEqual(sleep_mock.call_count, 3)
-        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1), mock.call(0.1)])
+        sleep_mock.assert_not_called()
 
     def test_hotmail007_timeout_fails_after_three_retries(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -213,8 +317,7 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("", ""))
         self.assertEqual(get_mail_mock.call_count, 4)
-        self.assertEqual(sleep_mock.call_count, 3)
-        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1), mock.call(0.1)])
+        sleep_mock.assert_not_called()
 
     def test_hotmail007_tls_error_uses_max_retry_after_multiple_buy_errors(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -251,8 +354,7 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("tls-retry@example.com", "tls-retry@example.com"))
         self.assertEqual(get_mail_mock.call_count, 8)
-        self.assertEqual(sleep_mock.call_count, 7)
-        sleep_mock.assert_has_calls([mock.call(0.1)] * 7)
+        sleep_mock.assert_not_called()
 
     def test_hotmail007_tls_error_fails_after_hotmail007_max_retry(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -278,8 +380,7 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("", ""))
         self.assertEqual(get_mail_mock.call_count, 4)
-        self.assertEqual(sleep_mock.call_count, 3)
-        sleep_mock.assert_has_calls([mock.call(0.1), mock.call(0.1), mock.call(0.1)])
+        sleep_mock.assert_not_called()
 
     def test_get_email_and_token_dispatches_to_local_outlook_mode(self):
         ctx.EMAIL_MODE = "local_outlook"
@@ -460,6 +561,22 @@ class MailProviderTests(unittest.TestCase):
             self.assertTrue(os.path.exists(bad_file))
             with open(bad_file, "r", encoding="utf-8") as handle:
                 self.assertIn("broken@example.com----pass----client----refresh", handle.read())
+
+    def test_get_oai_code_uses_primary_email_for_alias_mailbox(self):
+        ctx._hotmail007_credentials["alias+abcdef@example.com"] = {
+            "client_id": "client",
+            "refresh_token": "refresh",
+            "primary_email": "primary@example.com",
+            "mail_mode": "imap",
+            "known_ids": set(),
+        }
+
+        with mock.patch.object(hotmail, "_outlook_fetch_otp", return_value="654321") as fetch_mock:
+            code = hotmail.get_oai_code("alias+abcdef@example.com")
+
+        self.assertEqual(code, "654321")
+        self.assertEqual(fetch_mock.call_args.args[0], "primary@example.com")
+        self.assertEqual(fetch_mock.call_args.kwargs["error_email"], "alias+abcdef@example.com")
 
     def test_outlook_fetch_otp_graph_marks_retryable_mail_access_error_on_http_503(self):
         ctx._hotmail007_credentials["graph503@example.com"] = {

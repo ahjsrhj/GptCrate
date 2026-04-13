@@ -181,17 +181,20 @@ def _bootstrap_authorize_continue(
     return did, sentinel
 
 
-def _bootstrap_initial_device_with_proxy_refresh(
+def _bootstrap_device_with_proxy_refresh(
     auth_url: str,
     proxy: Optional[str],
     get_next_proxy: Optional[Callable[[], Optional[str]]] = None,
     resin_state: Optional[ctx.ResinRunState] = None,
     *,
+    session: Optional[requests.Session] = None,
     network_checked: bool = False,
+    device_label: str = "Device ID",
+    retry_reason: str = "获取 Device ID 失败",
 ) -> tuple[requests.Session, Optional[str], Any, str, str]:
     current_proxy = proxy
     proxies = ctx.build_proxies(current_proxy, resin_state=resin_state)
-    session = _new_session(proxies=proxies)
+    session = session or _new_session(proxies=proxies)
     proxy_refresh_count = 0
 
     while True:
@@ -203,6 +206,7 @@ def _bootstrap_initial_device_with_proxy_refresh(
             session,
             auth_url,
             proxies=proxies,
+            device_label=device_label,
             device_id_retry_limit=_INITIAL_DEVICE_ID_RETRY_LIMIT,
             log_missing_device_error=False,
         )
@@ -218,7 +222,7 @@ def _bootstrap_initial_device_with_proxy_refresh(
 
         if resin_state is not None and ctx.is_resin_enabled() and not current_proxy:
             proxy_refresh_count += 1
-            print(f"[*] 获取 Device ID 失败，重新生成 Resin 启动账号 ({proxy_refresh_count}/{_INITIAL_PROXY_REFRESH_LIMIT})...")
+            print(f"[*] {retry_reason}，重新生成 Resin 启动账号 ({proxy_refresh_count}/{_INITIAL_PROXY_REFRESH_LIMIT})...")
             new_account = ctx.get_resin_startup_account(force_new=True, resin_state=resin_state)
             proxies = ctx.build_proxies(current_proxy, resin_state=resin_state)
             session = _new_session(proxies=proxies)
@@ -237,11 +241,49 @@ def _bootstrap_initial_device_with_proxy_refresh(
             return session, current_proxy, proxies, "", ""
 
         proxy_refresh_count += 1
-        print(f"[*] 获取 Device ID 失败，重新获取代理 ({proxy_refresh_count}/{_INITIAL_PROXY_REFRESH_LIMIT})...")
+        print(f"[*] {retry_reason}，重新获取代理 ({proxy_refresh_count}/{_INITIAL_PROXY_REFRESH_LIMIT})...")
         current_proxy = next_proxy
         proxies = ctx.build_proxies(current_proxy, resin_state=resin_state)
         session = _new_session(proxies=proxies)
         print(f"[*] 已切换新代理: {ctx.build_proxy_url(current_proxy, resin_state=resin_state) or '直连'}")
+
+
+def _bootstrap_initial_device_with_proxy_refresh(
+    auth_url: str,
+    proxy: Optional[str],
+    get_next_proxy: Optional[Callable[[], Optional[str]]] = None,
+    resin_state: Optional[ctx.ResinRunState] = None,
+    *,
+    network_checked: bool = False,
+) -> tuple[requests.Session, Optional[str], Any, str, str]:
+    return _bootstrap_device_with_proxy_refresh(
+        auth_url,
+        proxy,
+        get_next_proxy=get_next_proxy,
+        resin_state=resin_state,
+        network_checked=network_checked,
+    )
+
+
+def _bootstrap_relogin_device_with_proxy_refresh(
+    session: requests.Session,
+    auth_url: str,
+    proxy: Optional[str],
+    get_next_proxy: Optional[Callable[[], Optional[str]]] = None,
+    resin_state: Optional[ctx.ResinRunState] = None,
+    *,
+    network_checked: bool = False,
+) -> tuple[requests.Session, Optional[str], Any, str, str]:
+    return _bootstrap_device_with_proxy_refresh(
+        auth_url,
+        proxy,
+        get_next_proxy=get_next_proxy,
+        resin_state=resin_state,
+        session=session,
+        network_checked=network_checked,
+        device_label="重登录 Device ID",
+        retry_reason="重登录获取 Device ID 失败",
+    )
 
 
 def _is_phone_challenge_response(payload: dict) -> bool:
@@ -580,11 +622,13 @@ def run(proxy: Optional[str], get_next_proxy: Optional[Callable[[], Optional[str
             s.cookies.clear()
 
             oauth_start = oauth.generate_oauth_url()
-            new_did, sentinel2 = _bootstrap_authorize_continue(
+            s, current_proxy, proxies, new_did, sentinel2 = _bootstrap_relogin_device_with_proxy_refresh(
                 s,
                 oauth_start.auth_url,
-                proxies=proxies,
-                device_label="重登录 Device ID",
+                current_proxy,
+                get_next_proxy=get_next_proxy,
+                resin_state=resin_state,
+                network_checked=True,
             )
             new_did = new_did or did
             if not new_did or not sentinel2:

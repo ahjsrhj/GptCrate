@@ -231,13 +231,17 @@ HOTMAIL007_API_URL=https://gapi.hotmail007.com
 HOTMAIL007_API_KEY=你的API密钥
 HOTMAIL007_MAIL_TYPE=outlook-premium
 HOTMAIL007_MAIL_MODE=imap
+# 是否开启邮箱裂变（true=购买 1 个原始邮箱后裂变成 5 个别名并依次使用）
+HOTMAIL007_ALIAS_SPLIT_ENABLED=false
 # 拉取邮箱失败时的最大重试次数
 HOTMAIL007_MAX_RETRY=3
 ```
 
 `HOTMAIL007_MAIL_MODE` 支持 `graph` (Microsoft Graph API) 和 `imap` (IMAP 协议) 两种收信方式。
+- `HOTMAIL007_ALIAS_SPLIT_ENABLED=true` 时，程序会把购买到的 1 个原始微软邮箱裂变成 5 个 `local+随机6位@domain` 别名并加入内存队列
+- 开启裂变后，注册流程消费的是别名邮箱，验证码仍通过对应原始邮箱的微软 OAuth 凭据轮询获取
 - Hotmail007 模式注册成功后，除了写入 `tokens/accounts.txt`，还会额外写入 `tokens/emails.txt`
-- `tokens/emails.txt` 每行格式为 `邮箱----邮箱密码----client_id----refresh_token`
+- `tokens/emails.txt` 每行格式为 `原始邮箱----邮箱密码----client_id----refresh_token`
 
 **LuckMail 模式配置（推荐）：**
 
@@ -593,7 +597,7 @@ uv run python start.py
 | `token_xxx@xxx_时间戳.json` | 注册成功的 Token JSON (含 access_token / refresh_token / email 等) |
 | `accounts.txt`              | 输入账号文件；`file` 或 `local_outlook` 模式会读取它               |
 | `tokens/accounts.txt`       | 所有成功注册的账号密码，格式: `邮箱----密码`                       |
-| `tokens/emails.txt`         | Hotmail007 成功注册时导出的邮箱凭据，格式: `邮箱----邮箱密码----client_id----refresh_token` |
+| `tokens/emails.txt`         | Hotmail007 成功注册时导出的原始微软邮箱凭据，格式: `原始邮箱----邮箱密码----client_id----refresh_token` |
 | `bad_local_outlook.txt`     | 本地 Outlook 模式失效账号记录                                      |
 
 ---

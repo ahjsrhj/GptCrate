@@ -8,10 +8,15 @@ class ResinContextTests(unittest.TestCase):
     def setUp(self):
         self._original_resin_url = ctx.RESIN_URL
         self._original_resin_platform_name = ctx.RESIN_PLATFORM_NAME
+        self._original_log_thread_id = ctx.get_log_thread_id()
 
     def tearDown(self):
         ctx.RESIN_URL = self._original_resin_url
         ctx.RESIN_PLATFORM_NAME = self._original_resin_platform_name
+        if self._original_log_thread_id is None:
+            ctx.clear_log_thread_id()
+        else:
+            ctx.set_log_thread_id(self._original_log_thread_id)
 
     def test_build_proxies_assembles_resin_proxy_url_with_explicit_account(self):
         ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
@@ -58,6 +63,34 @@ class ResinContextTests(unittest.TestCase):
 
         self.assertEqual(current_account, "tvufekb8677")
         self.assertEqual(resin_state.current_account, "tvufekb8677")
+
+    def test_extract_resin_account_reads_account_from_proxy_url(self):
+        ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
+        ctx.RESIN_PLATFORM_NAME = "reg"
+
+        account = ctx.extract_resin_account("http://reg.user123:my-token@127.0.0.1:2260")
+
+        self.assertEqual(account, "user123")
+
+    def test_extract_resin_account_ignores_non_resin_proxy(self):
+        ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
+        ctx.RESIN_PLATFORM_NAME = "reg"
+
+        account = ctx.extract_resin_account("http://user:pass@10.0.0.1:8080")
+
+        self.assertEqual(account, "")
+
+    def test_log_thread_color_uses_fixed_mapping(self):
+        self.assertEqual(ctx.get_log_thread_color(1), "cyan")
+        self.assertEqual(ctx.get_log_thread_color(2), "green")
+        self.assertEqual(ctx.get_log_thread_color(8), "cyan")
+
+    def test_set_log_thread_id_stores_positive_integer_only(self):
+        ctx.set_log_thread_id("3")
+        self.assertEqual(ctx.get_log_thread_id(), 3)
+
+        ctx.set_log_thread_id(0)
+        self.assertIsNone(ctx.get_log_thread_id())
 
     def test_multiple_resin_states_do_not_share_startup_accounts(self):
         state_one = ctx.ResinRunState(startup_account="aaa111")

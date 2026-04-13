@@ -162,6 +162,24 @@ class StartPyTests(unittest.TestCase):
             self.assertIn("LOCAL_OUTLOOK_MAIL_MODE=imap", content)
             self.assertIn("LOCAL_OUTLOOK_BAD_FILE=bad_local_outlook.txt", content)
 
+    def test_generate_env_supports_hotmail007_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):
+            start.generate_env(
+                platform="hotmail007",
+                api_key="secret-key",
+                count=2,
+                threads=1,
+            )
+
+            with open(".env", "r", encoding="utf-8") as handle:
+                content = handle.read()
+
+            self.assertIn("EMAIL_MODE=hotmail007", content)
+            self.assertIn("HOTMAIL007_API_KEY=secret-key", content)
+            self.assertIn("HOTMAIL007_MAIL_TYPE=hotmail", content)
+            self.assertIn("HOTMAIL007_MAIL_MODE=graph", content)
+            self.assertIn("HOTMAIL007_ALIAS_SPLIT_ENABLED=false", content)
+
     def test_generate_env_supports_cf_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):
             start.generate_env(

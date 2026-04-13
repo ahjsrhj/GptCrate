@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 import urllib.parse
 from typing import Any
@@ -9,10 +10,12 @@ from curl_cffi import requests
 
 from . import context as ctx
 from .cf_mail import extract_otp_code
+from .microsoft_alias import expand_microsoft_alias_emails
 from .ui import rich_print as print
 
 _MAIL_ACCESS_RETRY_LIMIT = 3
-_HOTMAIL007_RETRY_DELAY_SECONDS = 0.1
+_HOTMAIL007_ALIAS_COUNT = 5
+_HOTMAIL007_QUEUE_LOCK = threading.Lock()
 
 
 def _resolve_outlook_mail_mode(preferred: str | None = None) -> str:
@@ -241,6 +244,93 @@ def hotmail007_get_mail(quantity: int = 1, proxies: Any = None) -> tuple:
     return out, ""
 
 
+def _get_hotmail007_queue() -> ctx.ActiveEmailQueue:
+    if ctx._hotmail007_queue is None:
+        ctx._hotmail007_queue = ctx.ActiveEmailQueue()
+    return ctx._hotmail007_queue
+
+
+def _build_hotmail007_queue_accounts(mail_info: dict) -> list[dict]:
+    primary_email = str(mail_info.get("email") or "").strip()
+    if not primary_email:
+        return []
+
+    if ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED:
+        email_addresses = expand_microsoft_alias_emails(
+            primary_email,
+            count=_HOTMAIL007_ALIAS_COUNT,
+            include_original=False,
+        )
+    else:
+        email_addresses = [primary_email]
+
+    mail_mode = _resolve_outlook_mail_mode(ctx.HOTMAIL007_MAIL_MODE)
+    return [
+        {
+            "email": email_addr,
+            "primary_email": primary_email,
+            "password": str(mail_info.get("password") or "").strip(),
+            "refresh_token": str(mail_info.get("refresh_token") or "").strip(),
+            "client_id": str(mail_info.get("client_id") or "").strip(),
+            "mail_mode": mail_mode,
+        }
+        for email_addr in email_addresses
+        if str(email_addr or "").strip()
+    ]
+
+
+def _fetch_hotmail007_account_with_retry(proxies: Any = None) -> dict | None:
+    max_retry = max(1, int(getattr(ctx, "HOTMAIL007_MAX_RETRY", 3) or 3))
+    buy_retry = 0
+    fetch_retry = 0
+    while True:
+        mails, err = hotmail007_get_mail(quantity=1, proxies=proxies)
+        if not err and mails:
+            return mails[0]
+
+        print(f"[Error] Hotmail007 拉取邮箱失败: {err}")
+        err_text = str(err or "").strip().lower()
+        if _is_user_cancelled_request_error(err):
+            raise KeyboardInterrupt
+        if err_text == "buy error":
+            buy_retry += 1
+            print(f"[*] Hotmail007 购买邮箱暂时失败，立即重试 (第 {buy_retry} 次)...")
+            continue
+
+        fetch_retry += 1
+        if fetch_retry > max_retry:
+            return None
+        print(f"[*] Hotmail007 拉取邮箱失败，立即重试 ({fetch_retry}/{max_retry})...")
+
+
+def _pop_hotmail007_queue_account(proxies: Any = None) -> tuple[dict | None, int]:
+    queue = _get_hotmail007_queue()
+    with _HOTMAIL007_QUEUE_LOCK:
+        account = queue.pop()
+        if account is None:
+            print("[*] Hotmail007 队列为空，开始购买新邮箱补货...")
+            mail_info = _fetch_hotmail007_account_with_retry(proxies=proxies)
+            if not mail_info:
+                return None, 0
+
+            queue_accounts = _build_hotmail007_queue_accounts(mail_info)
+            if not queue_accounts:
+                return None, 0
+            queue.add_batch(queue_accounts)
+
+            if ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED:
+                print(
+                    f"[*] Hotmail007 购买成功，已将 {mail_info['email']} 裂变为 "
+                    f"{len(queue_accounts)} 个别名并加入队列"
+                )
+            else:
+                print(f"[*] Hotmail007 购买成功，已将 {mail_info['email']} 加入队列")
+
+            account = queue.pop()
+        remaining = len(queue)
+    return account, remaining
+
+
 def _outlook_get_graph_token(client_id: str, refresh_token: str, proxies: Any = None) -> str:
     response = requests.post(
         "https://login.microsoftonline.com/common/oauth2/v2.0/token",
@@ -429,12 +519,21 @@ def _outlook_get_known_ids(email_addr: str, client_id: str, refresh_token: str, 
         return set()
 
 
-def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str, known_ids: set, proxies: Any = None, timeout: int = 120) -> str:
-    _set_mail_error(email_addr, None)
+def _outlook_fetch_otp_graph(
+    email_addr: str,
+    client_id: str,
+    refresh_token: str,
+    known_ids: set,
+    proxies: Any = None,
+    timeout: int = 120,
+    error_email: str | None = None,
+) -> str:
+    state_email = str(error_email or email_addr).strip() or email_addr
+    _set_mail_error(state_email, None)
     try:
         access_token = _outlook_get_graph_token(client_id, refresh_token, proxies)
     except Exception as exc:
-        _set_mail_error(email_addr, f"token_error:{exc}")
+        _set_mail_error(state_email, f"token_error:{exc}")
         print(f"[Graph] access token 失败: {exc}")
         return ""
 
@@ -462,7 +561,7 @@ def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str
                         flush=True,
                     )
                     if access_retry_count >= _MAIL_ACCESS_RETRY_LIMIT:
-                        _set_mail_error(email_addr, f"mail_access_retryable:{_normalize_mail_error(fetch_error)}")
+                        _set_mail_error(state_email, f"mail_access_retryable:{_normalize_mail_error(fetch_error)}")
                         print("\n[Graph] 邮箱访问连续失败，本轮先结束，交给上层重试", end="", flush=True)
                         return ""
                 else:
@@ -512,7 +611,7 @@ def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str
                     flush=True,
                 )
                 if access_retry_count >= _MAIL_ACCESS_RETRY_LIMIT:
-                    _set_mail_error(email_addr, f"mail_access_retryable:{last_access_error}")
+                    _set_mail_error(state_email, f"mail_access_retryable:{last_access_error}")
                     print("\n[Graph] 邮箱访问连续失败，本轮先结束，交给上层重试", end="", flush=True)
                     return ""
             else:
@@ -521,24 +620,25 @@ def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str
         time.sleep(3)
     if not had_successful_mail_fetch and last_access_error:
         if _is_retryable_mail_access_error(last_access_error):
-            _set_mail_error(email_addr, f"mail_access_retryable:{_normalize_mail_error(last_access_error)}")
+            _set_mail_error(state_email, f"mail_access_retryable:{_normalize_mail_error(last_access_error)}")
         else:
-            _set_mail_error(email_addr, f"mail_access_error:{_normalize_mail_error(last_access_error)}")
+            _set_mail_error(state_email, f"mail_access_error:{_normalize_mail_error(last_access_error)}")
     else:
-        _set_mail_error(email_addr, "otp_timeout")
+        _set_mail_error(state_email, "otp_timeout")
     print(" 超时，未收到验证码")
     return ""
 
 
-def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str, known_ids: set, proxies: Any = None, timeout: int = 120) -> str:
+def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str, known_ids: set, proxies: Any = None, timeout: int = 120, error_email: str | None = None) -> str:
     import email as email_lib
     import imaplib
 
-    _set_mail_error(email_addr, None)
+    state_email = str(error_email or email_addr).strip() or email_addr
+    _set_mail_error(state_email, None)
     try:
         access_token, imap_server = _outlook_get_imap_token(client_id, refresh_token, proxies, email_addr=email_addr)
     except Exception as exc:
-        _set_mail_error(email_addr, f"token_error:{exc}")
+        _set_mail_error(state_email, f"token_error:{exc}")
         print(f"[IMAP] access token 失败: {exc}")
         return ""
 
@@ -602,11 +702,11 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
         time.sleep(3)
     if not had_successful_mail_fetch and last_access_error:
         if _is_retryable_mail_access_error(last_access_error):
-            _set_mail_error(email_addr, f"mail_access_retryable:{_normalize_mail_error(last_access_error)}")
+            _set_mail_error(state_email, f"mail_access_retryable:{_normalize_mail_error(last_access_error)}")
         else:
-            _set_mail_error(email_addr, f"mail_access_error:{_normalize_mail_error(last_access_error)}")
+            _set_mail_error(state_email, f"mail_access_error:{_normalize_mail_error(last_access_error)}")
     else:
-        _set_mail_error(email_addr, "otp_timeout")
+        _set_mail_error(state_email, "otp_timeout")
     print(" 超时，未收到验证码")
     return ""
 
@@ -619,51 +719,56 @@ def _outlook_fetch_otp(
     proxies: Any = None,
     timeout: int = 120,
     mail_mode: str = "graph",
+    error_email: str | None = None,
 ) -> str:
     if known_ids is None:
         known_ids = set()
     resolved_mode = _resolve_outlook_mail_mode(mail_mode)
     if resolved_mode == "imap":
-        return _outlook_fetch_otp_imap(email_addr, client_id, refresh_token, known_ids, proxies, timeout)
-    return _outlook_fetch_otp_graph(email_addr, client_id, refresh_token, known_ids, proxies, timeout)
+        return _outlook_fetch_otp_imap(
+            email_addr,
+            client_id,
+            refresh_token,
+            known_ids,
+            proxies,
+            timeout,
+            error_email=error_email,
+        )
+    return _outlook_fetch_otp_graph(
+        email_addr,
+        client_id,
+        refresh_token,
+        known_ids,
+        proxies,
+        timeout,
+        error_email=error_email,
+    )
 
 
 def get_email_and_token(proxies: Any = None) -> tuple:
     if not ctx.HOTMAIL007_API_KEY:
         print("[Error] ctx.HOTMAIL007_API_KEY 未配置")
         return "", ""
-    max_retry = max(1, int(getattr(ctx, "HOTMAIL007_MAX_RETRY", 3) or 3))
-    mails = []
-    err = ""
-    buy_retry = 0
-    fetch_retry = 0
-    while True:
-        mails, err = hotmail007_get_mail(quantity=1, proxies=proxies)
-        if not err and mails:
-            break
-        print(f"[Error] Hotmail007 拉取邮箱失败: {err}")
-        err_text = str(err or "").strip().lower()
-        if _is_user_cancelled_request_error(err):
-            raise KeyboardInterrupt
-        if err_text == "buy error":
-            buy_retry += 1
-            print(f"[*] Hotmail007 购买邮箱暂时失败，继续重试 (第 {buy_retry} 次)...")
-            time.sleep(_HOTMAIL007_RETRY_DELAY_SECONDS)
-            continue
-        fetch_retry += 1
-        if fetch_retry > max_retry:
-            return "", ""
-        print(f"[*] Hotmail007 拉取邮箱失败，准备重试 ({fetch_retry}/{max_retry})...")
-        time.sleep(_HOTMAIL007_RETRY_DELAY_SECONDS)
-    mail_info = mails[0]
-    email = mail_info["email"]
+    mail_info, remaining = _pop_hotmail007_queue_account(proxies=proxies)
+    if not mail_info:
+        return "", ""
+
+    email = str(mail_info.get("email") or "").strip()
+    primary_email = str(mail_info.get("primary_email") or email).strip() or email
     ctx._hotmail007_credentials[email] = {
         "client_id": mail_info["client_id"],
         "refresh_token": mail_info["refresh_token"],
         "ms_password": mail_info["password"],
+        "primary_email": primary_email,
+        "mail_mode": mail_info.get("mail_mode", _resolve_outlook_mail_mode(ctx.HOTMAIL007_MAIL_MODE)),
+        "source": "hotmail007",
     }
+    if email != primary_email:
+        print(f"[*] Hotmail007 从别名队列取出邮箱: {email} (原始邮箱: {primary_email}, 剩余: {remaining})")
+    else:
+        print(f"[*] Hotmail007 从队列取出邮箱: {email} (剩余: {remaining})")
     print("[*] Hotmail007 预获取已有邮件ID...")
-    known_ids = _outlook_get_known_ids(email, mail_info["client_id"], mail_info["refresh_token"], proxies)
+    known_ids = _outlook_get_known_ids(primary_email, mail_info["client_id"], mail_info["refresh_token"], proxies)
     ctx._hotmail007_credentials[email]["known_ids"] = known_ids
     return email, email
 
@@ -699,6 +804,7 @@ def get_local_email_and_token(proxies: Any = None) -> tuple:
             "client_id": account["client_id"],
             "refresh_token": account["refresh_token"],
             "ms_password": account.get("password", ""),
+            "primary_email": email,
             "mail_mode": mode,
             "source": "local_outlook",
             "account_line": _local_outlook_account_to_line(account),
@@ -715,14 +821,16 @@ def get_oai_code(email: str, proxies: Any = None) -> str:
     if not creds:
         print(f"[Error] 未找到 {email} 的 Hotmail007 凭据")
         return ""
+    mailbox_email = str(creds.get("primary_email") or email).strip() or email
     code = _outlook_fetch_otp(
-        email,
+        mailbox_email,
         creds["client_id"],
         creds["refresh_token"],
         known_ids=creds.get("known_ids", set()),
         proxies=proxies,
         timeout=120,
         mail_mode=creds.get("mail_mode", ctx.HOTMAIL007_MAIL_MODE),
+        error_email=email,
     )
     if not code and creds.get("source") == "local_outlook":
         last_error = str(creds.get("last_mail_error") or "").strip()

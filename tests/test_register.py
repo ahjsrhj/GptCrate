@@ -268,6 +268,75 @@ class RegisterFlowTests(unittest.TestCase):
         self.assertEqual(resin_state.current_account, "reset99")
         self.assertEqual(sleep_mock.call_count, 1)
 
+    def test_relogin_device_id_failure_switches_proxy_and_reuses_existing_session(self):
+        class FakeCookies(dict):
+            pass
+
+        class FakeSession:
+            def __init__(self, proxies=None, impersonate=None):
+                del impersonate
+                self.proxies = proxies
+                self.cookies = FakeCookies()
+                self.get_calls = []
+
+            def get(self, url, **kwargs):
+                del kwargs
+                self.get_calls.append(str(url))
+                proxy = (self.proxies or {}).get("http")
+                resp = mock.Mock()
+                if "cloudflare.com/cdn-cgi/trace" in str(url):
+                    resp.text = "loc=US\n"
+                elif proxy and "proxy-b" in proxy:
+                    resp.text = ""
+                    self.cookies["oai-did"] = "did-proxy-b"
+                else:
+                    resp.text = ""
+                    self.cookies["oai-did"] = None
+                return resp
+
+        existing_session = FakeSession(
+            proxies={"http": "http://proxy-a:8080", "https": "http://proxy-a:8080"}
+        )
+
+        with mock.patch.object(
+            register.requests,
+            "Session",
+            side_effect=lambda proxies=None, impersonate=None: FakeSession(
+                proxies=proxies,
+                impersonate=impersonate,
+            ),
+        ) as session_mock, mock.patch.object(register.requests, "post") as post_mock, mock.patch.object(
+            register.time, "sleep"
+        ) as sleep_mock:
+            post_mock.return_value = mock.Mock(status_code=200)
+            post_mock.return_value.json.return_value = {"token": "sentinel-token"}
+            session, proxy, proxies, did, sentinel = register._bootstrap_relogin_device_with_proxy_refresh(
+                existing_session,
+                "https://auth.openai.com/oauth/authorize",
+                "http://proxy-a:8080",
+                get_next_proxy=mock.Mock(return_value="http://proxy-b:8080"),
+                network_checked=True,
+            )
+
+        self.assertIsNot(session, existing_session)
+        self.assertEqual(proxy, "http://proxy-b:8080")
+        self.assertEqual(
+            proxies,
+            {"http": "http://proxy-b:8080", "https": "http://proxy-b:8080"},
+        )
+        self.assertEqual(did, "did-proxy-b")
+        self.assertIn("sentinel-token", sentinel)
+        self.assertEqual(existing_session.get_calls, ["https://auth.openai.com/oauth/authorize"] * 2)
+        self.assertEqual(
+            session.get_calls,
+            [
+                "https://cloudflare.com/cdn-cgi/trace",
+                "https://auth.openai.com/oauth/authorize",
+            ],
+        )
+        self.assertEqual(session_mock.call_count, 1)
+        self.assertEqual(sleep_mock.call_count, 1)
+
     def test_run_falls_back_to_startup_account_after_email_proxy_network_failure(self):
         ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
         ctx.RESIN_PLATFORM_NAME = "reg"

@@ -6,6 +6,7 @@ import shutil
 import sys
 import threading
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -105,10 +106,42 @@ def _print_final_stats() -> None:
     if fail_reason_items:
         rows.append(_style("失败原因", "bright_black") + " " + _style(" / ".join(fail_reason_items), "red"))
     _safe_print(_panel("注册统计面板", rows, tone="magenta"))
+    _print_failed_resin_accounts_summary(stats["failed_resin_accounts"])
 
 
 def _safe_print(message: str = "") -> None:
-    print(message, flush=True)
+    thread_id = ctx.get_log_thread_id()
+    if not thread_id or not message:
+        print(message, flush=True)
+        return
+
+    prefix = _style(f"[{thread_id}]", "bold", ctx.get_log_thread_color(thread_id)) + " "
+    lines = message.splitlines()
+    if not lines:
+        print(prefix.rstrip(), flush=True)
+        return
+    formatted = "\n".join(f"{prefix}{line}" if line else line for line in lines)
+    print(formatted, flush=True)
+
+
+def _record_failed_resin_account(proxy_str: Optional[str], tag: str = "") -> None:
+    resin_account = ctx.extract_resin_account(proxy_str)
+    if not resin_account:
+        return
+    if ctx._reg_stats:
+        ctx._reg_stats.add_failed_resin_account(resin_account)
+    _print_with_stats_clear(f"注册失败使用的粘性代理account: {resin_account}", tag)
+
+
+def _print_failed_resin_accounts_summary(accounts: list[str]) -> None:
+    if not accounts:
+        return
+
+    ordered_counts = Counter(accounts)
+    ordered_accounts = list(dict.fromkeys(accounts))
+    count_summary = " / ".join(f"{account} x{ordered_counts[account]}" for account in ordered_accounts)
+    _safe_print(_style("失败粘性代理account(按失败顺序): ", "yellow") + _style(", ".join(accounts), "white"))
+    _safe_print(_style("失败粘性代理account汇总: ", "yellow") + _style(count_summary, "white"))
 
 
 def _disable_email_on_failure(email: str, tag: str = "") -> None:
@@ -146,6 +179,7 @@ def _append_hotmail007_email_credentials(account_email: str, output_dir: str) ->
         return
 
     creds = ctx._hotmail007_credentials.get(account_email) or {}
+    export_email = str(creds.get("primary_email") or account_email).strip() or account_email
     ms_password = str(creds.get("ms_password") or "").strip()
     client_id = str(creds.get("client_id") or "").strip()
     refresh_token = str(creds.get("refresh_token") or "").strip()
@@ -158,7 +192,7 @@ def _append_hotmail007_email_credentials(account_email: str, output_dir: str) ->
     with ctx._file_write_lock:
         os.makedirs(output_dir, exist_ok=True)
         with open(emails_file, "a", encoding="utf-8") as ef:
-            ef.write(f"{account_email}----{ms_password}----{client_id}----{refresh_token}\n")
+            ef.write(f"{export_email}----{ms_password}----{client_id}----{refresh_token}\n")
     _safe_print(f"[*] Hotmail007 邮箱凭据已追加至: {emails_file}")
 
 
@@ -639,100 +673,110 @@ def _worker(
     """单个注册工作线程，返回本线程成功注册数"""
     local_success = 0
     local_round = 0
+    ctx.set_log_thread_id(worker_id)
+    try:
+        while not stop_event.is_set():
+            if ctx.EMAIL_MODE in {"file", "local_outlook"} and ctx._email_queue is not None and len(ctx._email_queue) == 0:
+                _print_with_stats_clear("邮箱队列已用完，停止线程")
+                break
 
-    while not stop_event.is_set():
-        if ctx.EMAIL_MODE in {"file", "local_outlook"} and ctx._email_queue is not None and len(ctx._email_queue) == 0:
-            _print_with_stats_clear(f"[T{worker_id}] 邮箱队列已用完，停止线程")
-            break
-
-        if remaining is not None:
-            with ctx._success_counter_lock:
-                if remaining[0] <= 0:
-                    break
-                remaining[0] -= 1
-
-        local_round += 1
-        proxy_str = rotator.next() if len(rotator) > 0 else single_proxy
-        tag = f"[T{worker_id}#{local_round}]"
-        proxy_label = proxy_str
-        if not proxy_label and ctx.is_resin_enabled() and not single_proxy and len(rotator) == 0:
-            proxy_label = "Resin 动态代理"
-
-        _print_with_stats_clear(f"[{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_label or '直连'})", "")
-
-        email_used = None
-        fail_reason = None
-        try:
-            # 记录尝试
-            if ctx._reg_stats:
-                ctx._reg_stats.add_attempt()
-
-            next_proxy_getter = rotator.next if len(rotator) > 1 else None
-            result = register.run(proxy_str, get_next_proxy=next_proxy_getter)
-            token_json = result[0] if result else None
-            password = result[1] if result else None
-            email_used = result[2] if len(result) > 2 else None
-            fail_reason = result[3] if len(result) > 3 else "other_error"
-            used_proxy = result[4] if len(result) > 4 else proxy_str
-
-            if token_json == "retry_403":
-                _print_with_stats_clear("检测到 403，等待10秒后重试...", tag)
-                if ctx._reg_stats:
-                    ctx._reg_stats.add_failure("403_forbidden")
-                    _print_status_snapshot(force=True)
-                if remaining is not None:
-                    with ctx._success_counter_lock:
-                        remaining[0] += 1
-                time.sleep(10)
-                continue
-
-            if token_json:
-                _save_result(token_json, password, used_proxy)
-                local_success += 1
+            if remaining is not None:
                 with ctx._success_counter_lock:
-                    ctx._success_counter += 1
+                    if remaining[0] <= 0:
+                        break
+                    remaining[0] -= 1
+
+            local_round += 1
+            proxy_str = rotator.next() if len(rotator) > 0 else single_proxy
+            tag = f"[#{local_round}]"
+            proxy_label = proxy_str
+            if not proxy_label and ctx.is_resin_enabled() and not single_proxy and len(rotator) == 0:
+                proxy_label = "Resin 动态代理"
+
+            _print_with_stats_clear(f"[{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_label or '直连'})", "")
+
+            email_used = None
+            fail_reason = None
+            used_proxy = proxy_str
+            try:
+                # 记录尝试
                 if ctx._reg_stats:
-                    ctx._reg_stats.add_success()
-                    _print_status_snapshot(force=True)
-                _print_with_stats_clear(f"注册成功! (本线程累计: {local_success})", tag)
-            else:
-                _print_with_stats_clear("本次注册失败", tag)
+                    ctx._reg_stats.add_attempt()
+
+                next_proxy_getter = rotator.next if len(rotator) > 1 else None
+                result = register.run(proxy_str, get_next_proxy=next_proxy_getter)
+                token_json = result[0] if result else None
+                password = result[1] if result else None
+                email_used = result[2] if len(result) > 2 else None
+                fail_reason = result[3] if len(result) > 3 else "other_error"
+                used_proxy = result[4] if len(result) > 4 else proxy_str
+
+                if token_json == "retry_403":
+                    _print_with_stats_clear("检测到 403，等待10秒后重试...", tag)
+                    if ctx._reg_stats:
+                        ctx._reg_stats.add_failure("403_forbidden")
+                    _record_failed_resin_account(used_proxy, tag)
+                    if ctx._reg_stats:
+                        _print_status_snapshot(force=True)
+                    if remaining is not None:
+                        with ctx._success_counter_lock:
+                            remaining[0] += 1
+                    time.sleep(10)
+                    continue
+
+                if token_json:
+                    _save_result(token_json, password, used_proxy)
+                    local_success += 1
+                    with ctx._success_counter_lock:
+                        ctx._success_counter += 1
+                    if ctx._reg_stats:
+                        ctx._reg_stats.add_success()
+                        _print_status_snapshot(force=True)
+                    _print_with_stats_clear(f"注册成功! (本线程累计: {local_success})", tag)
+                else:
+                    _print_with_stats_clear("本次注册失败", tag)
+                    if ctx._reg_stats:
+                        ctx._reg_stats.add_failure(fail_reason or "other_error")
+                    _record_failed_resin_account(used_proxy, tag)
+                    if ctx._reg_stats:
+                        _print_status_snapshot(force=True)
+                    # 注册失败时禁用邮箱
+                    if ctx.EMAIL_MODE == "luckmail" and email_used:
+                        _disable_email_on_failure(email_used, tag)
+                    if ctx.EMAIL_MODE in {"file", "local_outlook"} and ctx._email_queue is not None and len(ctx._email_queue) == 0:
+                        _print_with_stats_clear("邮箱队列已用完，停止线程", tag)
+                        break
+
+            except Exception as e:
+                _print_with_stats_clear(f"[Error] 未捕获异常: {e}", tag)
                 if ctx._reg_stats:
-                    ctx._reg_stats.add_failure(fail_reason or "other_error")
+                    ctx._reg_stats.add_failure("other_error")
+                _record_failed_resin_account(used_proxy, tag)
+                if ctx._reg_stats:
                     _print_status_snapshot(force=True)
-                # 注册失败时禁用邮箱
+                # 异常时也尝试禁用邮箱
                 if ctx.EMAIL_MODE == "luckmail" and email_used:
                     _disable_email_on_failure(email_used, tag)
-                if ctx.EMAIL_MODE in {"file", "local_outlook"} and ctx._email_queue is not None and len(ctx._email_queue) == 0:
-                    _print_with_stats_clear("邮箱队列已用完，停止线程", tag)
-                    break
 
-        except Exception as e:
-            _print_with_stats_clear(f"[Error] 未捕获异常: {e}", tag)
-            if ctx._reg_stats:
-                ctx._reg_stats.add_failure("other_error")
-                _print_status_snapshot(force=True)
-            # 异常时也尝试禁用邮箱
-            if ctx.EMAIL_MODE == "luckmail" and email_used:
-                _disable_email_on_failure(email_used, tag)
+            if count_target == 1 and remaining is None:
+                break
 
-        if count_target == 1 and remaining is None:
-            break
+            if remaining is not None:
+                with ctx._success_counter_lock:
+                    if remaining[0] <= 0:
+                        break
 
-        if remaining is not None:
-            with ctx._success_counter_lock:
-                if remaining[0] <= 0:
-                    break
+            if not stop_event.is_set():
+                wait_time = random.randint(sleep_min, sleep_max)
+                _print_with_stats_clear(f"休息 {wait_time} 秒...", tag)
+                for _ in range(wait_time):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(1)
 
-        if not stop_event.is_set():
-            wait_time = random.randint(sleep_min, sleep_max)
-            _print_with_stats_clear(f"休息 {wait_time} 秒...", tag)
-            for _ in range(wait_time):
-                if stop_event.is_set():
-                    break
-                time.sleep(1)
-
-    return local_success
+        return local_success
+    finally:
+        ctx.clear_log_thread_id()
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本")

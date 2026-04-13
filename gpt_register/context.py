@@ -53,6 +53,7 @@ HOTMAIL007_API_URL = os.getenv("HOTMAIL007_API_URL", "https://gapi.hotmail007.co
 HOTMAIL007_API_KEY = os.getenv("HOTMAIL007_API_KEY", "").strip()
 HOTMAIL007_MAIL_TYPE = os.getenv("HOTMAIL007_MAIL_TYPE", "outlook").strip()
 HOTMAIL007_MAIL_MODE = os.getenv("HOTMAIL007_MAIL_MODE", "graph").strip().lower()
+HOTMAIL007_ALIAS_SPLIT_ENABLED = os.getenv("HOTMAIL007_ALIAS_SPLIT_ENABLED", "false").strip().lower() == "true"
 try:
     HOTMAIL007_MAX_RETRY = max(1, int(os.getenv("HOTMAIL007_MAX_RETRY", "3").strip()))
 except ValueError:
@@ -79,6 +80,16 @@ except ValueError:
 
 ACCOUNTS_FILE = os.getenv("ACCOUNTS_FILE", "accounts.txt").strip()
 AUTO_REGISTER_THRESHOLD = 10
+_LOG_THREAD_COLORS = (
+    "cyan",
+    "green",
+    "yellow",
+    "blue",
+    "magenta",
+    "red",
+    "white",
+)
+_log_thread_local = threading.local()
 
 
 def is_resin_enabled() -> bool:
@@ -194,6 +205,34 @@ def get_resin_startup_account(
     return state.get_resin_startup_account(force_new=force_new)
 
 
+def set_log_thread_id(thread_id: Optional[int]) -> None:
+    try:
+        value = int(thread_id) if thread_id is not None else None
+    except (TypeError, ValueError):
+        value = None
+    if value is not None and value <= 0:
+        value = None
+    _log_thread_local.thread_id = value
+
+
+def clear_log_thread_id() -> None:
+    _log_thread_local.thread_id = None
+
+
+def get_log_thread_id() -> Optional[int]:
+    value = getattr(_log_thread_local, "thread_id", None)
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def get_log_thread_color(thread_id: Optional[int] = None) -> str:
+    value = thread_id if thread_id is not None else get_log_thread_id()
+    if not value:
+        return "bright_black"
+    return _LOG_THREAD_COLORS[(value - 1) % len(_LOG_THREAD_COLORS)]
+
+
 def build_proxy_url(
     proxy: Optional[str],
     *,
@@ -221,6 +260,34 @@ def build_proxy_url(
         resin_config["scheme"],
     )
 
+
+def extract_resin_account(proxy_url: Optional[str]) -> str:
+    raw_proxy = str(proxy_url or "").strip()
+    if not raw_proxy or not is_resin_enabled():
+        return ""
+
+    try:
+        parsed_proxy = urllib.parse.urlsplit(raw_proxy)
+        resin_config = parse_resin_url()
+    except Exception:
+        return ""
+
+    if parsed_proxy.scheme != resin_config["scheme"]:
+        return ""
+    if parsed_proxy.hostname != resin_config["host"]:
+        return ""
+    if parsed_proxy.port != resin_config["port"]:
+        return ""
+
+    username = urllib.parse.unquote(parsed_proxy.username or "").strip()
+    if not username:
+        return ""
+
+    platform_prefix = f"{RESIN_PLATFORM_NAME}."
+    if not username.startswith(platform_prefix):
+        return ""
+
+    return normalize_resin_account(username[len(platform_prefix):])
 
 
 def _load_proxies(filepath: str) -> List[str]:
@@ -390,6 +457,7 @@ class RegistrationStats:
             "other_error": 0,
         }
         self.last_10_results: List[bool] = []
+        self.failed_resin_accounts: List[str] = []
 
     def add_attempt(self) -> None:
         with self._lock:
@@ -413,6 +481,13 @@ class RegistrationStats:
             if len(self.last_10_results) > 10:
                 self.last_10_results.pop(0)
 
+    def add_failed_resin_account(self, account: str) -> None:
+        account_value = normalize_resin_account(account)
+        if not account_value:
+            return
+        with self._lock:
+            self.failed_resin_accounts.append(account_value)
+
     def get_stats(self) -> dict:
         with self._lock:
             elapsed = time.time() - self.start_time
@@ -429,6 +504,7 @@ class RegistrationStats:
                 "recent_success_rate": recent_rate,
                 "speed_per_hour": speed,
                 "fail_reasons": self.fail_reasons.copy(),
+                "failed_resin_accounts": list(self.failed_resin_accounts),
             }
 
     def format_display(self) -> str:
@@ -505,6 +581,7 @@ class ActiveEmailQueue:
 
 _email_queue: Optional[EmailQueue] = None
 _active_email_queue: Optional[ActiveEmailQueue] = None
+_hotmail007_queue: Optional[ActiveEmailQueue] = None
 _prefetch_no_stock = False
 _prefetch_lock = threading.Lock()
 _luckmail_purchased_only = False

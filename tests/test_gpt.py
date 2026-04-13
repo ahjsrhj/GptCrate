@@ -10,6 +10,7 @@ from unittest import mock
 
 from gpt_register import cli
 from gpt_register import context as ctx
+from gpt_register import ui
 
 
 class FakeThread:
@@ -36,6 +37,7 @@ class FakeThread:
 class GptMainTests(unittest.TestCase):
     def setUp(self):
         FakeThread.instances = []
+        self._original_log_thread_id = ctx.get_log_thread_id()
         self._original_globals = {
             "EMAIL_MODE": ctx.EMAIL_MODE,
             "ACCOUNTS_FILE": ctx.ACCOUNTS_FILE,
@@ -50,6 +52,7 @@ class GptMainTests(unittest.TestCase):
             "LUCKMAIL_MAX_RETRY": ctx.LUCKMAIL_MAX_RETRY,
             "RESIN_URL": ctx.RESIN_URL,
             "RESIN_PLATFORM_NAME": ctx.RESIN_PLATFORM_NAME,
+            "_reg_stats": ctx._reg_stats,
             "_email_queue": ctx._email_queue,
             "_active_email_queue": ctx._active_email_queue,
             "_luckmail_own_only": ctx._luckmail_own_only,
@@ -67,6 +70,10 @@ class GptMainTests(unittest.TestCase):
     def tearDown(self):
         for key, value in self._original_globals.items():
             setattr(ctx, key, value)
+        if self._original_log_thread_id is None:
+            ctx.clear_log_thread_id()
+        else:
+            ctx.set_log_thread_id(self._original_log_thread_id)
 
     def test_main_applies_cli_overrides_and_starts_stats_thread_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -230,6 +237,64 @@ class GptMainTests(unittest.TestCase):
         self.assertNotIn("\033", compact)
         self.assertIn("状态 |", compact)
 
+    def test_safe_print_prefixes_worker_thread_id(self):
+        ctx.set_log_thread_id(2)
+
+        with redirect_stdout(StringIO()) as buffer:
+            cli._safe_print("[*] 密码登录状态: 200")
+
+        self.assertEqual(buffer.getvalue(), "[2] [*] 密码登录状态: 200\n")
+
+    def test_rich_print_prefixes_worker_thread_id(self):
+        ctx.set_log_thread_id(3)
+
+        with mock.patch.object(ui.console, "print") as console_print:
+            ui.rich_print("[*] 登录触发二次邮箱验证，尝试使用第一次的验证码...")
+
+        renderable = console_print.call_args.args[0]
+        self.assertEqual(
+            renderable.plain,
+            "[3] [*] 登录触发二次邮箱验证，尝试使用第一次的验证码...",
+        )
+        self.assertEqual(console_print.call_args.kwargs["end"], "\n")
+
+    def test_record_failed_resin_account_tracks_and_prints_account(self):
+        original_resin_url = ctx.RESIN_URL
+        original_resin_platform_name = ctx.RESIN_PLATFORM_NAME
+        ctx.RESIN_URL = "http://127.0.0.1:2260/my-token"
+        ctx.RESIN_PLATFORM_NAME = "reg"
+        ctx._reg_stats = ctx.RegistrationStats()
+
+        try:
+            with mock.patch.object(cli, "_print_with_stats_clear") as print_mock:
+                cli._record_failed_resin_account(
+                    "http://reg.failed001:my-token@127.0.0.1:2260",
+                    "[T2#9]",
+                )
+
+            self.assertEqual(ctx._reg_stats.get_stats()["failed_resin_accounts"], ["failed001"])
+            print_mock.assert_called_once_with("注册失败使用的粘性代理account: failed001", "[T2#9]")
+        finally:
+            ctx.RESIN_URL = original_resin_url
+            ctx.RESIN_PLATFORM_NAME = original_resin_platform_name
+
+    def test_print_final_stats_includes_failed_resin_account_summary(self):
+        ctx._reg_stats = ctx.RegistrationStats()
+        ctx._reg_stats.add_attempt()
+        ctx._reg_stats.add_failure("callback_error")
+        ctx._reg_stats.add_failed_resin_account("failed001")
+        ctx._reg_stats.add_failed_resin_account("failed002")
+        ctx._reg_stats.add_failed_resin_account("failed001")
+
+        with mock.patch.object(cli, "_safe_print") as print_mock:
+            cli._print_final_stats()
+
+        printed_messages = [call.args[0] for call in print_mock.call_args_list]
+        self.assertEqual(len(printed_messages), 3)
+        self.assertIn("注册统计面板", printed_messages[0])
+        self.assertIn("失败粘性代理account(按失败顺序): failed001, failed002, failed001", printed_messages[1])
+        self.assertIn("失败粘性代理account汇总: failed001 x2 / failed002 x1", printed_messages[2])
+
     def test_save_result_writes_cpa_and_sub_formats(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             token_json = (
@@ -324,6 +389,52 @@ class GptMainTests(unittest.TestCase):
                         "user@example.com----mail-secret----client-id----refresh-token-2\n",
                     )
                 delete_mock.assert_called_once_with("user@example.com", proxies=None)
+            finally:
+                ctx.TOKEN_OUTPUT_DIR = original_output_dir
+                ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir
+                ctx.EMAIL_MODE = original_email_mode
+                ctx._hotmail007_credentials.clear()
+                ctx._hotmail007_credentials.update(original_hotmail007_credentials)
+
+    def test_save_result_prefers_primary_hotmail007_email_in_emails_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_json = (
+                '{"access_token":"access-token","refresh_token":"refresh-token",'
+                '"account_id":"acc-001","email":"user+alias@example.com","type":"codex",'
+                '"expired":"2026-04-18T04:30:34Z"}'
+            )
+            original_output_dir = ctx.TOKEN_OUTPUT_DIR
+            original_proxy_auths_dir = ctx.CLI_PROXY_AUTHS_DIR
+            original_email_mode = ctx.EMAIL_MODE
+            original_hotmail007_credentials = dict(ctx._hotmail007_credentials)
+
+            try:
+                ctx.TOKEN_OUTPUT_DIR = temp_dir
+                ctx.CLI_PROXY_AUTHS_DIR = ""
+                ctx.EMAIL_MODE = "hotmail007"
+                ctx._hotmail007_credentials.clear()
+                ctx._hotmail007_credentials["user+alias@example.com"] = {
+                    "primary_email": "user@example.com",
+                    "ms_password": "mail-secret",
+                    "client_id": "client-id",
+                    "refresh_token": "refresh-token-2",
+                }
+                with mock.patch.object(cli.time, "time", return_value=1775622635), \
+                     mock.patch.object(cli.mail, "delete_temp_email") as delete_mock, \
+                     mock.patch.object(
+                         cli.codex2api,
+                         "upload_account",
+                         return_value={"attempted": True, "ok": True, "message": "成功添加 1 个账号"},
+                     ):
+                    cli._save_result(token_json, "secret-pass", None)
+
+                emails_path = os.path.join(temp_dir, "emails.txt")
+                with open(emails_path, "r", encoding="utf-8") as handle:
+                    self.assertEqual(
+                        handle.read(),
+                        "user@example.com----mail-secret----client-id----refresh-token-2\n",
+                    )
+                delete_mock.assert_called_once_with("user+alias@example.com", proxies=None)
             finally:
                 ctx.TOKEN_OUTPUT_DIR = original_output_dir
                 ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir
