@@ -1,4 +1,5 @@
 import os
+import inspect
 import tempfile
 import unittest
 from unittest import mock
@@ -17,6 +18,7 @@ class MailProviderTests(unittest.TestCase):
         self._original = {
             "EMAIL_MODE": ctx.EMAIL_MODE,
             "MAIL_DOMAIN": ctx.MAIL_DOMAIN,
+            "ACCOUNTS_FILE": ctx.ACCOUNTS_FILE,
             "LUCKMAIL_AUTO_BUY": ctx.LUCKMAIL_AUTO_BUY,
             "LUCKMAIL_OWN_ONLY": ctx.LUCKMAIL_OWN_ONLY,
             "LOCAL_OUTLOOK_MAIL_MODE": ctx.LOCAL_OUTLOOK_MAIL_MODE,
@@ -48,10 +50,18 @@ class MailProviderTests(unittest.TestCase):
         if os.path.exists(self._isolated_hotmail007_queue_file):
             os.remove(self._isolated_hotmail007_queue_file)
         setattr(ctx, "HOTMAIL007_QUEUE_FILE", self._isolated_hotmail007_queue_file)
+        self._isolated_accounts_file = os.path.join(
+            tempfile.gettempdir(),
+            f"accounts-test-{id(self)}.txt",
+        )
+        if os.path.exists(self._isolated_accounts_file):
+            os.remove(self._isolated_accounts_file)
+        ctx.ACCOUNTS_FILE = self._isolated_accounts_file
 
     def tearDown(self):
         ctx.EMAIL_MODE = self._original["EMAIL_MODE"]
         ctx.MAIL_DOMAIN = self._original["MAIL_DOMAIN"]
+        ctx.ACCOUNTS_FILE = self._original["ACCOUNTS_FILE"]
         ctx.LUCKMAIL_AUTO_BUY = self._original["LUCKMAIL_AUTO_BUY"]
         ctx.LUCKMAIL_OWN_ONLY = self._original["LUCKMAIL_OWN_ONLY"]
         ctx.LOCAL_OUTLOOK_MAIL_MODE = self._original["LOCAL_OUTLOOK_MAIL_MODE"]
@@ -69,6 +79,8 @@ class MailProviderTests(unittest.TestCase):
             setattr(ctx, "HOTMAIL007_QUEUE_FILE", self._original["HOTMAIL007_QUEUE_FILE"])
         if os.path.exists(self._isolated_hotmail007_queue_file):
             os.remove(self._isolated_hotmail007_queue_file)
+        if os.path.exists(self._isolated_accounts_file):
+            os.remove(self._isolated_accounts_file)
         ctx._email_queue = self._original["_email_queue"]
         ctx._active_email_queue = self._original["_active_email_queue"]
         ctx._hotmail007_queue = self._original["_hotmail007_queue"]
@@ -105,6 +117,14 @@ class MailProviderTests(unittest.TestCase):
         with open(path, "r", encoding="utf-8") as handle:
             return [line.strip() for line in handle if line.strip()]
 
+    def _hotmail007_async_pipeline_ready(self) -> bool:
+        prepare_source = inspect.getsource(cli._prepare_hotmail007_queue_stock)
+        pop_source = inspect.getsource(hotmail._pop_hotmail007_queue_account)
+        return (
+            "ensure_hotmail007_queue_capacity(batch_count" not in prepare_source
+            and "ensure_hotmail007_queue_capacity(1" not in pop_source
+        )
+
     def test_get_email_and_token_dispatches_to_cloudflare_mode(self):
         ctx.EMAIL_MODE = "cf"
         ctx.MAIL_DOMAIN = "example.com"
@@ -131,6 +151,59 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("user@example.com", "user@example.com"))
         self.assertEqual(ctx._hotmail007_credentials["user@example.com"]["known_ids"], {"known-id"})
+
+    def test_hotmail007_non_alias_purchase_appends_accounts_file(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = False
+        fake_mail = {
+            "email": "user@example.com",
+            "password": "secret",
+            "refresh_token": "refresh",
+            "client_id": "client",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx.ACCOUNTS_FILE = os.path.join(temp_dir, "accounts.txt")
+
+            with mock.patch.object(hotmail, "hotmail007_get_mail", return_value=([fake_mail], "")), \
+                 mock.patch.object(hotmail, "_outlook_get_known_ids", return_value={"known-id"}):
+                email, token = mail.get_email_and_token()
+
+            self.assertEqual((email, token), ("user@example.com", "user@example.com"))
+            with open(ctx.ACCOUNTS_FILE, "r", encoding="utf-8") as handle:
+                self.assertEqual(
+                    handle.read(),
+                    "user@example.com----secret----client----refresh\n",
+                )
+
+    def test_hotmail007_alias_split_purchase_does_not_append_accounts_file(self):
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_MAX_RETRY = 3
+        ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = True
+        fake_mail = {
+            "email": "user@example.com",
+            "password": "secret",
+            "refresh_token": "refresh",
+            "client_id": "client",
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ctx.ACCOUNTS_FILE = os.path.join(temp_dir, "accounts.txt")
+
+            with mock.patch.object(hotmail, "hotmail007_get_mail", return_value=([fake_mail], "")), \
+                 mock.patch.object(
+                     hotmail,
+                     "expand_microsoft_alias_emails",
+                     return_value=["user+alias@example.com"],
+                 ), \
+                 mock.patch.object(hotmail, "_outlook_get_known_ids", return_value={"known-id"}):
+                email, token = mail.get_email_and_token()
+
+            self.assertEqual((email, token), ("user+alias@example.com", "user+alias@example.com"))
+            self.assertFalse(os.path.exists(ctx.ACCOUNTS_FILE))
 
     def test_hotmail007_alias_split_reuses_queue_before_buying_next_account(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -291,7 +364,7 @@ class MailProviderTests(unittest.TestCase):
             self.assertEqual(second_email, "recover-2@example.com")
             self.assertEqual(self._read_queue_lines(queue_file), [])
 
-    def test_hotmail007_batch_mode_uses_existing_queue_stock_without_buying(self):
+    def test_hotmail007_batch_mode_uses_existing_queue_stock_without_buying_when_warm_pool_ready(self):
         ctx.EMAIL_MODE = "hotmail007"
         ctx.HOTMAIL007_API_KEY = "key"
         ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = True
@@ -302,10 +375,8 @@ class MailProviderTests(unittest.TestCase):
                 handle.write(
                     "\n".join(
                         [
-                            self._build_hotmail007_queue_line("stock-1@example.com"),
-                            self._build_hotmail007_queue_line("stock-2@example.com"),
-                            self._build_hotmail007_queue_line("stock-3@example.com"),
-                            self._build_hotmail007_queue_line("stock-4@example.com"),
+                            self._build_hotmail007_queue_line(f"stock-{index}@example.com")
+                            for index in range(21)
                         ]
                     )
                     + "\n"
@@ -350,10 +421,12 @@ class MailProviderTests(unittest.TestCase):
                 cli.main()
 
             self.assertEqual(observed["batch_count"], 3)
-            self.assertEqual(len(observed["queue_lines"]), 4)
+            self.assertEqual(len(observed["queue_lines"]), 21)
             stats_thread.join.assert_called_once()
 
-    def test_hotmail007_batch_mode_prefills_queue_to_requested_count(self):
+    def test_hotmail007_batch_mode_warms_queue_to_twenty_one_before_start(self):
+        if not self._hotmail007_async_pipeline_ready():
+            self.skipTest("等待核心切换到 Hotmail007 后台购买 + 前台注册模型")
         ctx.EMAIL_MODE = "hotmail007"
         ctx.HOTMAIL007_API_KEY = "key"
         ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = True
@@ -424,8 +497,78 @@ class MailProviderTests(unittest.TestCase):
                 cli.main()
 
             self.assertEqual(observed["batch_count"], 6)
-            self.assertGreaterEqual(len(observed["queue_lines"]), 6)
-            self.assertEqual(get_mail_mock.call_count, 1)
+            self.assertGreaterEqual(len(observed["queue_lines"]), 21)
+            self.assertLess(len(observed["queue_lines"]), 26)
+            self.assertEqual(get_mail_mock.call_count, 4)
+            stats_thread.join.assert_called_once()
+
+    def test_hotmail007_batch_mode_does_not_prefill_all_remaining_registrations_before_start(self):
+        if not self._hotmail007_async_pipeline_ready():
+            self.skipTest("等待核心切换到 Hotmail007 后台购买 + 前台注册模型")
+        ctx.EMAIL_MODE = "hotmail007"
+        ctx.HOTMAIL007_API_KEY = "key"
+        ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            queue_file = os.path.join(temp_dir, "hotmail007.txt")
+            setattr(ctx, "HOTMAIL007_QUEUE_FILE", queue_file)
+
+            fake_args = mock.Mock(
+                proxy=None,
+                proxy_file=None,
+                once=False,
+                count=50,
+                threads=1,
+                check=False,
+                sleep_min=1,
+                sleep_max=1,
+                email_mode="hotmail007",
+                accounts_file=None,
+                hotmail007_key="key",
+                hotmail007_type=None,
+                hotmail007_mail_mode=None,
+                local_outlook_mail_mode=None,
+                luckmail_key=None,
+                luckmail_auto_buy=False,
+                luckmail_max_retry=None,
+            )
+            stats_thread = mock.Mock()
+            purchased_mail = {
+                "email": "primary@example.com",
+                "password": "secret",
+                "refresh_token": "refresh",
+                "client_id": "client",
+            }
+            aliases = [
+                "primary+a@example.com",
+                "primary+b@example.com",
+                "primary+c@example.com",
+                "primary+d@example.com",
+                "primary+e@example.com",
+            ]
+            observed = {}
+
+            def capture_batch_mode(**kwargs):
+                observed["batch_count"] = kwargs["batch_count"]
+                observed["queue_lines"] = self._read_queue_lines(queue_file)
+
+            with mock.patch.object(hotmail, "hotmail007_get_mail", return_value=([purchased_mail], "")) as get_mail_mock, \
+                 mock.patch.object(hotmail, "expand_microsoft_alias_emails", return_value=aliases), \
+                 mock.patch.object(cli.argparse.ArgumentParser, "parse_args", return_value=fake_args), \
+                 mock.patch.object(cli, "_print_runtime_summary"), \
+                 mock.patch.object(cli, "_prepare_output_session"), \
+                 mock.patch.object(cli, "_print_status_snapshot"), \
+                 mock.patch.object(cli, "_start_luckmail_prefetch", return_value=None), \
+                 mock.patch.object(cli, "_start_stats_thread", return_value=stats_thread), \
+                 mock.patch.object(cli, "_run_batch_mode", side_effect=capture_batch_mode), \
+                 mock.patch.object(cli, "_run_loop_mode"):
+                cli.main()
+
+            self.assertEqual(observed["batch_count"], 50)
+            self.assertGreaterEqual(len(observed["queue_lines"]), 21)
+            self.assertLess(len(observed["queue_lines"]), 50)
+            self.assertGreaterEqual(get_mail_mock.call_count, 5)
+            self.assertLessEqual(get_mail_mock.call_count, 6)
             stats_thread.join.assert_called_once()
 
     def test_hotmail007_loop_mode_prefills_queue_above_twenty(self):

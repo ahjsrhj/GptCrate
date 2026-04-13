@@ -5,7 +5,7 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 
 
@@ -709,6 +709,17 @@ _session_sub_dir = ""
 _session_accounts_file = ""
 _hotmail007_runtime_batch_target: Optional[int] = None
 _hotmail007_runtime_loop_mode = False
+_hotmail007_runtime_condition = threading.Condition()
+_hotmail007_runtime_stop_event: Optional[threading.Event] = None
+_hotmail007_runtime_purchase_thread: Optional[threading.Thread] = None
+_hotmail007_runtime_purchase_running = False
+_hotmail007_runtime_registration_started = False
+_hotmail007_runtime_async_enabled = False
+_hotmail007_runtime_waiting_consumers = 0
+_hotmail007_runtime_remaining_tasks: Optional[int] = None
+_hotmail007_runtime_remaining_tasks_getter: Optional[Callable[[], Optional[int]]] = None
+_hotmail007_runtime_ready_threshold = 21
+_hotmail007_runtime_low_watermark = 5
 
 _INVALID_ERRORS = {
     "account_deactivated", "invalid_api_key", "user_deactivated",

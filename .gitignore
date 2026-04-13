@@ -33,7 +33,10 @@ account.txt
 accounts.txt
 bad_local_outlook.txt
 proxies.txt
+hotmail007.txt
 
 # OS
 .DS_Store
 Thumbs.db
+
+out/

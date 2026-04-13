@@ -247,8 +247,10 @@ OUTLOOK_PROXY=http://127.0.0.1:7890
 `HOTMAIL007_MAIL_MODE` 支持 `graph` (Microsoft Graph API) 和 `imap` (IMAP 协议) 两种收信方式。
 - `HOTMAIL007_ALIAS_SPLIT_ENABLED=true` 时，程序会优先消费 `HOTMAIL007_QUEUE_FILE` 指向的库存文件，默认是项目根目录下的 `hotmail007.txt`
 - 裂变库存队列按文本文件持久化，消费时从文件头顺序读取，用掉一个就立刻从文件中删除，避免未用完的子邮箱丢失
-- 有限批量注册时，如果 `hotmail007.txt` 中的可用子邮箱数量不足本次注册数量，程序会继续购买并裂变，直到库存补足到当前注册数量
-- 无限模式运行时，程序会持续维持 `hotmail007.txt` 中的可用子邮箱数量大于 20；低于等于 20 时会补货
+- 开启裂变后，购买和注册会拆分成两个流程：先把号池暖到至少 21 个子邮箱，再启动注册；只有达到这个门槛才会进入注册阶段
+- 有限批量注册时，即使本次 `count` 小于 21，也会先暖池到 21；注册开始后只在低水位 `<= 5` 时按剩余待注册次数做增量补货，不会在启动前一次性补到 `count`
+- 如果注册线程临时把号池用空，会阻塞等待后台购买线程补货，不会回退成前台同步购买
+- 无限模式运行时，启动前同样先暖池到 21，运行中则持续维持 `hotmail007.txt` 中的可用子邮箱数量大于 20；低于等于 20 时后台会继续补货
 - 每次新购买并裂变出的 5 个子邮箱会先打乱，再随机插入现有队列；实际注册时仍按文件顺序消费
 - `hotmail007.txt` 每行格式固定为：`alias_email----primary_email----password----client_id----mail_mode----refresh_token`
 - 开启裂变后，注册流程消费的是别名邮箱，验证码仍通过对应原始邮箱的微软 OAuth 凭据轮询获取
@@ -537,6 +539,12 @@ uv run python gpt.py --count 1 --threads 1
 
 ```txt
 email----password----client_id----refresh_token
+```
+
+或：
+
+```txt
+email:password:refresh_token:client_id
 ```
 
 批量转换为：

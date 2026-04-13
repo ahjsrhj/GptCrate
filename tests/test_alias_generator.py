@@ -31,6 +31,27 @@ class AliasGeneratorTests(unittest.TestCase):
         self.assertEqual(result.skipped_count, 1)
         self.assertIn("user@gmail.com----pass", result.remaining_lines)
 
+    def test_generate_aliases_supports_colon_accounts_and_reorders_fields(self):
+        with mock.patch.object(alias_generator, "random_suffix", return_value="abc123"):
+            result = alias_generator.generate_aliases_from_lines(
+                [
+                    "user@hotmail.com:pass:refresh-token:client-id",
+                ],
+                per_email=1,
+                preserve_fields=True,
+                remove_processed=False,
+                shuffle_output=False,
+            )
+
+        self.assertEqual(
+            result.aliases,
+            [
+                "user+abc123@hotmail.com----pass----client-id----refresh-token",
+            ],
+        )
+        self.assertEqual(result.valid_count, 1)
+        self.assertEqual(result.skipped_count, 0)
+
     def test_generate_aliases_can_remove_processed_from_input(self):
         with mock.patch.object(alias_generator, "random_suffix", return_value="abc123"):
             result = alias_generator.generate_aliases_from_lines(

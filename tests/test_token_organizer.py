@@ -86,6 +86,10 @@ class TokenOrganizerTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(Path("out/keep.txt").exists())
             self.assertFalse(Path("out/cpa/old.json").exists())
+            self.assertEqual(
+                Path("out/accounts.txt").read_text(encoding="utf-8"),
+                "alpha@hotmail.com----pass-1\n",
+            )
             self.assertTrue(Path("out/cpa/token_alpha_hotmail.com_1.json").exists())
             sub_data = json.loads(Path("out/sub.json").read_text(encoding="utf-8"))
             self.assertEqual([item["extra"]["email"] for item in sub_data["accounts"]], ["alpha@hotmail.com"])
@@ -108,6 +112,10 @@ class TokenOrganizerTests(unittest.TestCase):
             exit_code = token_organizer.main(["2", "tokens_alt"])
 
             self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                Path("out/accounts.txt").read_text(encoding="utf-8"),
+                "first@hotmail.com----pass-1\nsecond@hotmail.com----pass-1\n",
+            )
             sub_data = json.loads(Path("out/sub.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 [item["extra"]["email"] for item in sub_data["accounts"]],
@@ -140,6 +148,10 @@ class TokenOrganizerTests(unittest.TestCase):
                 exit_code = token_organizer.main(["2"])
 
             self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                Path("out/accounts.txt").read_text(encoding="utf-8"),
+                "only@hotmail.com----pass-1\n",
+            )
             sub_data = json.loads(Path("out/sub.json").read_text(encoding="utf-8"))
             self.assertEqual([item["extra"]["email"] for item in sub_data["accounts"]], ["only@hotmail.com"])
             self.assertFalse(Path("tokens/run_20260413_171715").exists())

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import random
+import re
 import string
 from dataclasses import dataclass
 from pathlib import Path
 
 
 SUPPORTED_PREFIXES = ("hotmail.", "outlook.")
+CANONICAL_DELIMITER = "----"
+COLON_ACCOUNT_PATTERN = re.compile(r"(.+):(.+):(.+):(.+)")
 
 
 @dataclass
@@ -35,10 +38,20 @@ def is_supported_outlook_email(email: str) -> bool:
 
 
 def split_account_line(line: str) -> tuple[str, list[str]]:
-    parts = [part.strip() for part in str(line).rstrip().split("----")]
-    if not parts:
+    raw_line = str(line).strip()
+    if not raw_line:
         return "", []
-    return parts[0], parts[1:]
+
+    if CANONICAL_DELIMITER in raw_line:
+        parts = [part.strip() for part in raw_line.split(CANONICAL_DELIMITER)]
+        return parts[0], parts[1:]
+
+    colon_match = COLON_ACCOUNT_PATTERN.fullmatch(raw_line)
+    if colon_match:
+        email, password, refresh_token, client_id = [part.strip() for part in colon_match.groups()]
+        return email, [password, client_id, refresh_token]
+
+    return raw_line, []
 
 
 def random_suffix(length: int = 6) -> str:
@@ -79,7 +92,7 @@ def generate_aliases_from_lines(
         count = max(1, int(per_email))
         for _ in range(count):
             alias = build_alias_email(email, random_suffix(suffix_length))
-            aliases.append("----".join([alias, *rest]) if preserve_fields and rest else alias)
+            aliases.append(CANONICAL_DELIMITER.join([alias, *rest]) if preserve_fields and rest else alias)
 
         if remove_processed:
             removed_count += 1
@@ -123,7 +136,9 @@ def run_interactive() -> int:
     print(" 微软邮箱多别名生成器")
     print("=" * 56)
     print("支持 @hotmail.* 和 @outlook.* 邮箱，默认保留原有字段。")
-    print("格式示例: email----password----client_id----refresh_token")
+    print("格式示例:")
+    print(f"  1. email{CANONICAL_DELIMITER}password{CANONICAL_DELIMITER}client_id{CANONICAL_DELIMITER}refresh_token")
+    print("  2. email:password:refresh_token:client_id")
     print()
 
     source_path_raw = input("输入源文件路径（留空则手动粘贴，默认 accounts.txt）: ").strip()

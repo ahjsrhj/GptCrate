@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -15,6 +16,9 @@ from .ui import rich_print as print
 
 _MAIL_ACCESS_RETRY_LIMIT = 3
 _HOTMAIL007_ALIAS_COUNT = 5
+_HOTMAIL007_READY_THRESHOLD = 21
+_HOTMAIL007_LOW_WATERMARK = 5
+_HOTMAIL007_WAIT_INTERVAL = 1.0
 _HOTMAIL007_QUEUE_LOCK = threading.Lock()
 
 
@@ -90,9 +94,33 @@ def _local_outlook_account_to_line(account: dict) -> str:
     )
 
 
-def _record_local_outlook_bad_account(account: dict, reason: str) -> None:
-    import os
+def _append_hotmail007_purchase_to_accounts_file(mail_info: dict) -> None:
+    if ctx.EMAIL_MODE != "hotmail007" or ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED:
+        return
 
+    email = str(mail_info.get("email") or "").strip()
+    password = str(mail_info.get("password") or "").strip()
+    client_id = str(mail_info.get("client_id") or "").strip()
+    refresh_token = str(mail_info.get("refresh_token") or "").strip()
+    if not email or "@" not in email or not password or not client_id or not refresh_token:
+        print("[Warning] Hotmail007 购买成功但凭据不完整，跳过写入 accounts.txt")
+        return
+    line = "----".join([email, password, client_id, refresh_token])
+
+    accounts_file = str(ctx.ACCOUNTS_FILE or "accounts.txt").strip() or "accounts.txt"
+    accounts_dir = os.path.dirname(accounts_file)
+    try:
+        if accounts_dir:
+            os.makedirs(accounts_dir, exist_ok=True)
+        with ctx._file_write_lock:
+            with open(accounts_file, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        print(f"[*] Hotmail007 原始邮箱凭据已追加至: {accounts_file}")
+    except Exception as exc:
+        print(f"[Warning] Hotmail007 写入 {accounts_file} 失败: {exc}")
+
+
+def _record_local_outlook_bad_account(account: dict, reason: str) -> None:
     reason_text = str(reason or "unknown").replace("\n", " ").strip()
     line = _local_outlook_account_to_line(account)
     if not line:
@@ -300,6 +328,7 @@ def _fetch_hotmail007_account_with_retry(proxies: Any = None) -> dict | None:
     while True:
         mails, err = hotmail007_get_mail(quantity=1, proxies=proxies)
         if not err and mails:
+            _append_hotmail007_purchase_to_accounts_file(mails[0])
             return mails[0]
 
         print(f"[Error] Hotmail007 拉取邮箱失败: {err}")
@@ -322,6 +351,8 @@ def _add_hotmail007_accounts_to_queue(queue: Any, queue_accounts: list[dict], pr
         return 0
     if _hotmail007_persistent_queue_enabled():
         added = queue.add_batch_randomized(queue_accounts)
+        if added:
+            notify_hotmail007_runtime_change()
         print(
             f"[*] Hotmail007 购买成功，已将 {primary_email} 裂变为 "
             f"{added} 个别名并随机写入队列文件 {ctx.HOTMAIL007_QUEUE_FILE}"
@@ -339,36 +370,331 @@ def _add_hotmail007_accounts_to_queue(queue: Any, queue_accounts: list[dict], pr
     return len(queue_accounts)
 
 
-def ensure_hotmail007_queue_capacity(target_size: int, proxies: Any = None) -> int:
-    if target_size <= 0:
-        return len(_get_hotmail007_queue())
+def _get_hotmail007_runtime_condition() -> threading.Condition:
+    return ctx._hotmail007_runtime_condition
 
-    queue = _get_hotmail007_queue()
-    with _HOTMAIL007_QUEUE_LOCK:
-        while len(queue) < target_size:
-            print(f"[*] Hotmail007 队列库存不足，开始补货... 当前 {len(queue)} / 目标 {target_size}")
-            mail_info = _fetch_hotmail007_account_with_retry(proxies=proxies)
-            if not mail_info:
-                break
-            queue_accounts = _build_hotmail007_queue_accounts(mail_info)
-            if not queue_accounts:
-                break
-            _add_hotmail007_accounts_to_queue(
-                queue,
-                queue_accounts,
-                str(mail_info.get("email") or "").strip() or "unknown",
-            )
-        return len(queue)
+
+def _get_hotmail007_stop_event(stop_event: Any = None) -> Any:
+    return stop_event if stop_event is not None else getattr(ctx, "_hotmail007_runtime_stop_event", None)
+
+
+def _is_hotmail007_stop_requested(stop_event: Any = None) -> bool:
+    runtime_stop_event = _get_hotmail007_stop_event(stop_event)
+    return bool(runtime_stop_event and runtime_stop_event.is_set())
+
+
+def _get_hotmail007_ready_threshold() -> int:
+    raw = getattr(ctx, "_hotmail007_runtime_ready_threshold", _HOTMAIL007_READY_THRESHOLD)
+    try:
+        return max(_HOTMAIL007_READY_THRESHOLD, int(raw))
+    except (TypeError, ValueError):
+        return _HOTMAIL007_READY_THRESHOLD
+
+
+def _get_hotmail007_low_watermark() -> int:
+    raw = getattr(ctx, "_hotmail007_runtime_low_watermark", _HOTMAIL007_LOW_WATERMARK)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _HOTMAIL007_LOW_WATERMARK
+
+
+def _get_hotmail007_remaining_tasks() -> int | None:
+    getter = getattr(ctx, "_hotmail007_runtime_remaining_tasks_getter", None)
+    value = None
+    if callable(getter):
+        try:
+            value = getter()
+        except Exception as exc:
+            print(f"[Warning] Hotmail007 剩余任务 getter 执行失败: {exc}")
+            value = None
+    if value is None:
+        value = getattr(ctx, "_hotmail007_runtime_remaining_tasks", None)
+    if value is None and not getattr(ctx, "_hotmail007_runtime_registration_started", False):
+        value = getattr(ctx, "_hotmail007_runtime_batch_target", None)
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_hotmail007_waiting_consumers() -> int:
+    raw = getattr(ctx, "_hotmail007_runtime_waiting_consumers", 0)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _get_hotmail007_background_target_size() -> int:
+    current_size = get_hotmail007_queue_size()
+    ready_threshold = _get_hotmail007_ready_threshold()
+    if getattr(ctx, "_hotmail007_runtime_loop_mode", False):
+        return ready_threshold
+
+    if not getattr(ctx, "_hotmail007_runtime_registration_started", False):
+        return ready_threshold
+
+    remaining_tasks = _get_hotmail007_remaining_tasks()
+    waiting_consumers = _get_hotmail007_waiting_consumers()
+    outstanding = waiting_consumers
+    if remaining_tasks is not None:
+        outstanding += max(0, remaining_tasks)
+    if outstanding <= 0:
+        return 0
+
+    if current_size > _get_hotmail007_low_watermark():
+        return current_size
+
+    additional_needed = max(0, outstanding - current_size)
+    if additional_needed <= 0:
+        return current_size
+    return current_size + min(_HOTMAIL007_ALIAS_COUNT, additional_needed)
+
+
+def notify_hotmail007_runtime_change() -> None:
+    condition = _get_hotmail007_runtime_condition()
+    with condition:
+        condition.notify_all()
+
+
+def set_hotmail007_runtime_stop_event(stop_event: Any = None) -> None:
+    ctx._hotmail007_runtime_stop_event = stop_event
+    notify_hotmail007_runtime_change()
+
+
+def set_hotmail007_registration_started(started: bool = True) -> None:
+    ctx._hotmail007_runtime_registration_started = bool(started)
+    notify_hotmail007_runtime_change()
+
+
+def set_hotmail007_remaining_tasks(remaining_tasks: int | None) -> None:
+    ctx._hotmail007_runtime_remaining_tasks = remaining_tasks
+    notify_hotmail007_runtime_change()
+
+
+def set_hotmail007_remaining_tasks_getter(getter: Any = None) -> None:
+    ctx._hotmail007_runtime_remaining_tasks_getter = getter if callable(getter) else None
+    notify_hotmail007_runtime_change()
+
+
+def set_hotmail007_waiting_consumers(waiting_consumers: int = 0) -> None:
+    ctx._hotmail007_runtime_waiting_consumers = max(0, int(waiting_consumers or 0))
+    notify_hotmail007_runtime_change()
 
 
 def get_hotmail007_queue_size() -> int:
     return len(_get_hotmail007_queue())
 
 
+def get_hotmail007_queue_size_nonblocking() -> int:
+    return get_hotmail007_queue_size()
+
+
+def wait_for_hotmail007_queue_size(
+    minimum_size: int,
+    *,
+    stop_event: Any = None,
+    timeout: float | None = None,
+) -> int:
+    target_size = max(0, int(minimum_size or 0))
+    if target_size <= 0:
+        return get_hotmail007_queue_size()
+
+    deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+    condition = _get_hotmail007_runtime_condition()
+    while True:
+        current_size = get_hotmail007_queue_size()
+        if current_size >= target_size:
+            return current_size
+        if _is_hotmail007_stop_requested(stop_event):
+            return current_size
+        if deadline is not None and time.monotonic() >= deadline:
+            return current_size
+
+        wait_timeout = _HOTMAIL007_WAIT_INTERVAL
+        if deadline is not None:
+            wait_timeout = min(wait_timeout, max(0.0, deadline - time.monotonic()))
+            if wait_timeout <= 0:
+                return get_hotmail007_queue_size()
+
+        with condition:
+            current_size = get_hotmail007_queue_size()
+            if current_size >= target_size or _is_hotmail007_stop_requested(stop_event):
+                return current_size
+            condition.wait(timeout=wait_timeout)
+
+
+def wait_for_hotmail007_queue_ready(
+    minimum_size: int = _HOTMAIL007_READY_THRESHOLD,
+    *,
+    stop_event: Any = None,
+    timeout: float | None = None,
+) -> int:
+    return wait_for_hotmail007_queue_size(minimum_size, stop_event=stop_event, timeout=timeout)
+
+
+def refill_hotmail007_queue_once(proxies: Any = None) -> int:
+    if not _hotmail007_persistent_queue_enabled():
+        return 0
+
+    queue = _get_hotmail007_queue()
+    with _HOTMAIL007_QUEUE_LOCK:
+        mail_info = _fetch_hotmail007_account_with_retry(proxies=proxies)
+        if not mail_info:
+            return 0
+        queue_accounts = _build_hotmail007_queue_accounts(mail_info)
+        if not queue_accounts:
+            return 0
+        return _add_hotmail007_accounts_to_queue(
+            queue,
+            queue_accounts,
+            str(mail_info.get("email") or "").strip() or "unknown",
+        )
+
+
+def ensure_hotmail007_queue_capacity(
+    target_size: int,
+    proxies: Any = None,
+    *,
+    stop_event: Any = None,
+) -> int:
+    if target_size <= 0:
+        return get_hotmail007_queue_size()
+
+    if not _hotmail007_persistent_queue_enabled():
+        return len(_get_hotmail007_queue())
+
+    while get_hotmail007_queue_size() < target_size and not _is_hotmail007_stop_requested(stop_event):
+        current_size = get_hotmail007_queue_size()
+        print(f"[*] Hotmail007 队列库存不足，开始补货... 当前 {current_size} / 目标 {target_size}")
+        added = refill_hotmail007_queue_once(proxies=proxies)
+        if added <= 0:
+            break
+    return get_hotmail007_queue_size()
+
+
+def trigger_hotmail007_incremental_refill(proxies: Any = None) -> int:
+    if not _hotmail007_persistent_queue_enabled():
+        return 0
+    target_size = _get_hotmail007_background_target_size()
+    current_size = get_hotmail007_queue_size()
+    if target_size <= current_size:
+        return current_size
+    return ensure_hotmail007_queue_capacity(target_size, proxies=proxies)
+
+
+def hotmail007_background_purchase_loop(
+    *,
+    proxies: Any = None,
+    stop_event: Any = None,
+    idle_wait: float = _HOTMAIL007_WAIT_INTERVAL,
+) -> None:
+    if not _hotmail007_persistent_queue_enabled():
+        return
+
+    if stop_event is not None:
+        ctx._hotmail007_runtime_stop_event = stop_event
+
+    condition = _get_hotmail007_runtime_condition()
+    with condition:
+        ctx._hotmail007_runtime_purchase_running = True
+        ctx._hotmail007_runtime_purchase_thread = threading.current_thread()
+        condition.notify_all()
+
+    try:
+        while not _is_hotmail007_stop_requested(stop_event):
+            current_size = get_hotmail007_queue_size()
+            target_size = _get_hotmail007_background_target_size()
+            if (
+                not getattr(ctx, "_hotmail007_runtime_loop_mode", False)
+                and getattr(ctx, "_hotmail007_runtime_registration_started", False)
+                and target_size <= 0
+            ):
+                break
+            if target_size > current_size:
+                print(f"[*] Hotmail007 后台补货触发: 当前 {current_size}, 目标 {target_size}")
+                added = refill_hotmail007_queue_once(proxies=proxies)
+                if added > 0:
+                    continue
+                if _is_hotmail007_stop_requested(stop_event):
+                    break
+                with condition:
+                    condition.wait(timeout=max(0.2, float(idle_wait)))
+                continue
+
+            with condition:
+                if _is_hotmail007_stop_requested(stop_event):
+                    break
+                condition.wait(timeout=max(0.2, float(idle_wait)))
+    finally:
+        with condition:
+            ctx._hotmail007_runtime_purchase_running = False
+            if threading.current_thread() is getattr(ctx, "_hotmail007_runtime_purchase_thread", None):
+                ctx._hotmail007_runtime_purchase_thread = None
+            condition.notify_all()
+
+
+def start_hotmail007_background_purchase_thread(
+    *,
+    proxies: Any = None,
+    stop_event: Any = None,
+    name: str = "hotmail007-buyer",
+) -> threading.Thread | None:
+    if not _hotmail007_persistent_queue_enabled():
+        return None
+
+    condition = _get_hotmail007_runtime_condition()
+    with condition:
+        existing_thread = getattr(ctx, "_hotmail007_runtime_purchase_thread", None)
+        if existing_thread and existing_thread.is_alive():
+            return existing_thread
+        if stop_event is not None:
+            ctx._hotmail007_runtime_stop_event = stop_event
+        purchase_thread = threading.Thread(
+            target=hotmail007_background_purchase_loop,
+            kwargs={"proxies": proxies, "stop_event": stop_event},
+            name=name,
+            daemon=True,
+        )
+        ctx._hotmail007_runtime_purchase_thread = purchase_thread
+        purchase_thread.start()
+        condition.notify_all()
+        return purchase_thread
+
+
 def _pop_hotmail007_queue_account(proxies: Any = None) -> tuple[dict | None, int]:
     queue = _get_hotmail007_queue()
-    if _hotmail007_persistent_queue_enabled() and len(queue) == 0:
-        ensure_hotmail007_queue_capacity(1, proxies=proxies)
+    if _hotmail007_persistent_queue_enabled():
+        if not getattr(ctx, "_hotmail007_runtime_async_enabled", False):
+            ensure_target = 1
+            ensure_hotmail007_queue_capacity(
+                ensure_target,
+                proxies=proxies,
+            )
+            with _HOTMAIL007_QUEUE_LOCK:
+                account = queue.pop()
+                remaining = len(queue)
+            return account, remaining
+
+        stop_event = _get_hotmail007_stop_event()
+        while True:
+            with _HOTMAIL007_QUEUE_LOCK:
+                account = queue.pop()
+                remaining = len(queue)
+            if account is not None:
+                notify_hotmail007_runtime_change()
+                return account, remaining
+
+            set_hotmail007_waiting_consumers(_get_hotmail007_waiting_consumers() + 1)
+            try:
+                remaining = wait_for_hotmail007_queue_size(1, stop_event=stop_event)
+                if remaining < 1:
+                    return None, remaining
+            finally:
+                set_hotmail007_waiting_consumers(_get_hotmail007_waiting_consumers() - 1)
 
     with _HOTMAIL007_QUEUE_LOCK:
         account = queue.pop()
@@ -390,10 +716,6 @@ def _pop_hotmail007_queue_account(proxies: Any = None) -> tuple[dict | None, int
             )
             account = queue.pop()
             remaining = len(queue)
-
-    if account and _hotmail007_persistent_queue_enabled() and ctx._hotmail007_runtime_loop_mode and remaining <= 20:
-        ensure_hotmail007_queue_capacity(21, proxies=proxies)
-        remaining = len(queue)
     return account, remaining
 
 

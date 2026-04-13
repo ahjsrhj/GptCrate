@@ -247,6 +247,11 @@ def _stage_output(
     staging_cpa_dir = staging_root / "cpa"
     staging_cpa_dir.mkdir(parents=True, exist_ok=True)
 
+    accounts_content = "\n".join(record.raw_line for record in selected)
+    if accounts_content:
+        accounts_content += "\n"
+    (staging_root / "accounts.txt").write_text(accounts_content, encoding="utf-8")
+
     for record in selected:
         shutil.copy2(record.cpa_path, staging_cpa_dir / record.cpa_path.name)
 
@@ -258,6 +263,12 @@ def _stage_output(
 
 def _validate_staged_output(selected: list[SelectedRecord], staging_root: Path) -> None:
     expected_emails = [record.email for record in selected]
+    staged_account_lines = [
+        raw_line
+        for raw_line in (staging_root / "accounts.txt").read_text(encoding="utf-8").splitlines()
+        if raw_line.strip()
+    ]
+    staged_account_emails = [_extract_account_email_from_line(raw_line) for raw_line in staged_account_lines]
     staged_cpa_emails = [
         _extract_cpa_email(staging_root / "cpa" / record.cpa_path.name)
         for record in selected
@@ -275,6 +286,8 @@ def _validate_staged_output(selected: list[SelectedRecord], staging_root: Path) 
     if len(staged_sub_emails) != len(sub_accounts):
         raise ValueError("输出的 sub.json 中存在非对象账号")
 
+    if expected_emails != staged_account_emails:
+        raise ValueError("输出的 accounts.txt 账号顺序与已选账号不一致")
     if expected_emails != staged_cpa_emails:
         raise ValueError("输出的 cpa 账号顺序与已选账号不一致")
     if expected_emails != staged_sub_emails:
@@ -292,6 +305,11 @@ def _apply_staged_output(staging_root: Path, output_dir: Path) -> None:
     temp_sub_path = output_dir / ".sub.json.tmp"
     shutil.copy2(staged_sub_path, temp_sub_path)
     temp_sub_path.replace(output_dir / "sub.json")
+
+    staged_accounts_path = staging_root / "accounts.txt"
+    temp_accounts_path = output_dir / ".accounts.txt.tmp"
+    shutil.copy2(staged_accounts_path, temp_accounts_path)
+    temp_accounts_path.replace(output_dir / "accounts.txt")
 
 
 def _write_remaining_lines(accounts_path: Path, removed_indexes: set[int]) -> None:

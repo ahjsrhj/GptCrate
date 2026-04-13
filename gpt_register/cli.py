@@ -19,6 +19,11 @@ from . import sub_format
 
 
 _ANSI_RESET = "\033[0m"
+_HOTMAIL007_START_THRESHOLD = 21
+_HOTMAIL007_BATCH_LOW_WATER = 5
+_HOTMAIL007_ASYNC_BUYER_POLL_SECONDS = 1.0
+_HOTMAIL007_ASYNC_EMPTY_WAIT_SECONDS = 1.0
+_HOTMAIL007_ORIGINAL_ENSURE_CAPACITY = None
 _ANSI = {
     "dim": "\033[2m",
     "bold": "\033[1m",
@@ -428,6 +433,7 @@ def _prepare_output_session() -> None:
 
 
 def _apply_cli_overrides(args: argparse.Namespace) -> None:
+    _reset_hotmail007_async_runtime()
     ctx._hotmail007_queue = None
     ctx._hotmail007_runtime_batch_target = None
     ctx._hotmail007_runtime_loop_mode = False
@@ -456,6 +462,213 @@ def _hotmail007_persistent_queue_enabled() -> bool:
     return ctx.EMAIL_MODE == "hotmail007" and ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED
 
 
+def _build_hotmail007_provider_proxies(
+    rotator: ctx.ProxyRotator,
+    effective_single_proxy: Optional[str],
+    resin_state: Optional[ctx.ResinRunState] = None,
+):
+    provider_proxy = effective_single_proxy or (rotator.next() if len(rotator) > 0 else None)
+    return ctx.build_proxies(provider_proxy, resin_state=resin_state)
+
+
+def _reset_hotmail007_async_runtime() -> None:
+    ctx._hotmail007_runtime_async_enabled = False
+    ctx._hotmail007_runtime_batch_target = None
+    ctx._hotmail007_runtime_loop_mode = False
+    ctx._hotmail007_runtime_waiting_consumers = 0
+    ctx._hotmail007_runtime_remaining_tasks = None
+    ctx._hotmail007_runtime_remaining_tasks_getter = None
+    ctx._hotmail007_runtime_purchase_thread = None
+    ctx._hotmail007_runtime_purchase_running = False
+    ctx._hotmail007_runtime_registration_started = False
+    hotmail.set_hotmail007_runtime_stop_event(None)
+    hotmail.set_hotmail007_registration_started(False)
+    hotmail.set_hotmail007_remaining_tasks(None)
+    hotmail.set_hotmail007_waiting_consumers(0)
+    hotmail.set_hotmail007_remaining_tasks_getter(None)
+    global _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY
+    if _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY is not None:
+        hotmail.ensure_hotmail007_queue_capacity = _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY
+
+
+def _install_hotmail007_async_capacity_bridge(state: dict) -> None:
+    global _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY
+    if _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY is None:
+        _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY = hotmail.ensure_hotmail007_queue_capacity
+
+    original_ensure = _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY
+
+    def _async_ensure_hotmail007_queue_capacity(target_size: int, proxies=None) -> int:
+        if not state.get("enabled") or not _hotmail007_persistent_queue_enabled():
+            return original_ensure(target_size, proxies=proxies)
+
+        queue_size = hotmail.get_hotmail007_queue_size()
+        if target_size <= queue_size:
+            return queue_size
+
+        if threading.get_ident() == state.get("buyer_thread_ident"):
+            return original_ensure(target_size, proxies=proxies)
+
+        condition = state["condition"]
+        stop_event = state["stop_event"]
+        with condition:
+            state["demand_target"] = max(int(state.get("demand_target", 0)), int(target_size))
+            condition.notify_all()
+
+        if target_size > 1:
+            return hotmail.get_hotmail007_queue_size()
+
+        with condition:
+            state["waiting_consumers"] = int(state.get("waiting_consumers", 0)) + 1
+            condition.notify_all()
+        try:
+            while not stop_event.is_set():
+                queue_size = hotmail.get_hotmail007_queue_size()
+                if queue_size > 0:
+                    return queue_size
+                with condition:
+                    condition.wait(timeout=_HOTMAIL007_ASYNC_EMPTY_WAIT_SECONDS)
+            return hotmail.get_hotmail007_queue_size()
+        finally:
+            with condition:
+                state["waiting_consumers"] = max(0, int(state.get("waiting_consumers", 0)) - 1)
+                condition.notify_all()
+
+    hotmail.ensure_hotmail007_queue_capacity = _async_ensure_hotmail007_queue_capacity
+
+
+def _compute_hotmail007_batch_target_stock(state: dict, queue_size: int) -> int:
+    remaining = state.get("remaining")
+    remaining_count = 0
+    if remaining is not None:
+        with ctx._success_counter_lock:
+            remaining_count = max(0, int(remaining[0]))
+    waiting_consumers = max(0, int(state.get("waiting_consumers", 0)))
+    outstanding = remaining_count + waiting_consumers
+    if outstanding <= 0:
+        return 0
+    if not state["registration_started"].is_set():
+        return _HOTMAIL007_START_THRESHOLD
+    if queue_size > _HOTMAIL007_BATCH_LOW_WATER:
+        return 0
+    return max(queue_size, min(outstanding, queue_size + 5))
+
+
+def _hotmail007_buyer_loop(
+    *,
+    state: dict,
+    rotator: ctx.ProxyRotator,
+    effective_single_proxy: Optional[str],
+    resin_state: Optional[ctx.ResinRunState] = None,
+) -> None:
+    original_ensure = state["original_ensure"]
+    condition = state["condition"]
+    stop_event = state["stop_event"]
+    state["buyer_thread_ident"] = threading.get_ident()
+
+    while not stop_event.is_set():
+        queue_size = hotmail.get_hotmail007_queue_size()
+        if state.get("loop_mode"):
+            desired = _HOTMAIL007_START_THRESHOLD if queue_size <= 20 else 0
+            if not state["registration_started"].is_set():
+                desired = _HOTMAIL007_START_THRESHOLD
+        else:
+            desired = _compute_hotmail007_batch_target_stock(state, queue_size)
+            if state["registration_started"].is_set() and desired <= 0:
+                break
+
+        queued_demand = max(0, int(state.get("demand_target", 0)))
+        if queued_demand > desired:
+            desired = queued_demand
+
+        if desired > queue_size:
+            before = queue_size
+            after = original_ensure(
+                desired,
+                proxies=_build_hotmail007_provider_proxies(
+                    rotator,
+                    effective_single_proxy,
+                    resin_state=resin_state,
+                ),
+            )
+            with condition:
+                if after >= queued_demand:
+                    state["demand_target"] = 0
+                condition.notify_all()
+            if after <= before:
+                time.sleep(_HOTMAIL007_ASYNC_BUYER_POLL_SECONDS)
+            continue
+
+        with condition:
+            condition.wait(timeout=_HOTMAIL007_ASYNC_BUYER_POLL_SECONDS)
+
+
+def _start_hotmail007_buyer_thread(
+    *,
+    batch_count: Optional[int],
+    rotator: ctx.ProxyRotator,
+    effective_single_proxy: Optional[str],
+    stop_event: threading.Event,
+    remaining: Optional[list] = None,
+    resin_state: Optional[ctx.ResinRunState] = None,
+) -> Optional[tuple[threading.Thread, dict]]:
+    if not _hotmail007_persistent_queue_enabled():
+        ctx._hotmail007_runtime_batch_target = None
+        ctx._hotmail007_runtime_loop_mode = False
+        return None
+
+    ctx._hotmail007_runtime_batch_target = batch_count if batch_count and batch_count > 0 else None
+    ctx._hotmail007_runtime_loop_mode = not bool(batch_count and batch_count > 0)
+
+    state = {
+        "enabled": True,
+        "loop_mode": ctx._hotmail007_runtime_loop_mode,
+        "remaining": remaining,
+        "stop_event": stop_event,
+        "condition": threading.Condition(),
+        "registration_started": threading.Event(),
+        "demand_target": 0,
+        "waiting_consumers": 0,
+        "buyer_thread_ident": None,
+        "original_ensure": _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY or hotmail.ensure_hotmail007_queue_capacity,
+    }
+    _install_hotmail007_async_capacity_bridge(state)
+    state["original_ensure"] = _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY or hotmail.ensure_hotmail007_queue_capacity
+
+    thread = threading.Thread(
+        target=_hotmail007_buyer_loop,
+        kwargs={
+            "state": state,
+            "rotator": rotator,
+            "effective_single_proxy": effective_single_proxy,
+            "resin_state": resin_state,
+        },
+        daemon=True,
+        name="hotmail007-buyer",
+    )
+    thread.start()
+    return thread, state
+
+
+def _wait_for_hotmail007_start_stock(
+    *,
+    state: dict,
+    stop_event: threading.Event,
+    min_stock: int = _HOTMAIL007_START_THRESHOLD,
+) -> bool:
+    condition = state["condition"]
+    while not stop_event.is_set():
+        queue_size = hotmail.get_hotmail007_queue_size()
+        if queue_size >= min_stock:
+            print(f"[*] Hotmail007 裂变号池已达启动门槛: {queue_size} / {min_stock}")
+            return True
+        print(f"[*] 等待 Hotmail007 裂变号池暖池完成... 当前 {queue_size} / 启动门槛 {min_stock}")
+        with condition:
+            condition.notify_all()
+            condition.wait(timeout=1)
+    return False
+
+
 def _prepare_hotmail007_queue_stock(
     *,
     batch_count: Optional[int],
@@ -468,26 +681,22 @@ def _prepare_hotmail007_queue_stock(
         ctx._hotmail007_runtime_loop_mode = False
         return
 
-    provider_proxy = effective_single_proxy or (rotator.next() if len(rotator) > 0 else None)
-    provider_proxies = ctx.build_proxies(provider_proxy, resin_state=resin_state)
-    if batch_count and batch_count > 0:
-        ctx._hotmail007_runtime_batch_target = batch_count
-        ctx._hotmail007_runtime_loop_mode = False
-        before = hotmail.get_hotmail007_queue_size()
-        after = hotmail.ensure_hotmail007_queue_capacity(batch_count, proxies=provider_proxies)
-        print(
-            f"[*] Hotmail007 裂变队列预补货完成: {before} -> {after} "
-            f"(目标 {batch_count}, 文件 {ctx.HOTMAIL007_QUEUE_FILE})"
-        )
-        return
-
-    ctx._hotmail007_runtime_batch_target = None
-    ctx._hotmail007_runtime_loop_mode = True
+    ctx._hotmail007_runtime_batch_target = batch_count if batch_count and batch_count > 0 else None
+    ctx._hotmail007_runtime_loop_mode = not bool(batch_count and batch_count > 0)
     before = hotmail.get_hotmail007_queue_size()
-    after = hotmail.ensure_hotmail007_queue_capacity(21, proxies=provider_proxies)
+    target_size = _HOTMAIL007_START_THRESHOLD
+    ensure_fn = _HOTMAIL007_ORIGINAL_ENSURE_CAPACITY or hotmail.ensure_hotmail007_queue_capacity
+    after = ensure_fn(
+        target_size,
+        proxies=_build_hotmail007_provider_proxies(
+            rotator,
+            effective_single_proxy,
+            resin_state=resin_state,
+        ),
+    )
     print(
-        f"[*] Hotmail007 裂变队列循环模式保底完成: {before} -> {after} "
-        f"(目标至少 21, 文件 {ctx.HOTMAIL007_QUEUE_FILE})"
+        f"[*] Hotmail007 裂变队列同步暖池完成: {before} -> {after} "
+        f"(启动门槛 {_HOTMAIL007_START_THRESHOLD}, 文件 {ctx.HOTMAIL007_QUEUE_FILE})"
     )
 
 
@@ -622,8 +831,9 @@ def _run_batch_mode(
     sleep_min: int,
     sleep_max: int,
     stop_event: threading.Event,
+    remaining: Optional[list] = None,
 ) -> None:
-    remaining = [batch_count]
+    remaining = remaining or [batch_count]
     actual_threads = min(thread_count, batch_count)
     if actual_threads <= 1:
         _worker(
@@ -926,13 +1136,6 @@ def main() -> None:
     if args.once and not batch_count:
         batch_count = 1
 
-    _prepare_hotmail007_queue_stock(
-        batch_count=batch_count,
-        rotator=rotator,
-        effective_single_proxy=effective_single_proxy,
-        resin_state=runtime_resin_state,
-    )
-
     # 初始化注册统计
     ctx._reg_stats = ctx.RegistrationStats()
     ctx._success_counter = 0
@@ -940,8 +1143,53 @@ def main() -> None:
     stop_event = threading.Event()
     stats_thread = _start_stats_thread(stop_event)
     _print_status_snapshot(force=True)
-
+    hotmail007_batch_remaining = [batch_count] if batch_count and batch_count > 0 else None
+    hotmail007_buyer_thread = None
     try:
+        if _hotmail007_persistent_queue_enabled():
+            ctx._hotmail007_runtime_async_enabled = True
+            ctx._hotmail007_runtime_batch_target = batch_count if batch_count and batch_count > 0 else None
+            ctx._hotmail007_runtime_loop_mode = not bool(batch_count and batch_count > 0)
+            ctx._hotmail007_runtime_ready_threshold = _HOTMAIL007_START_THRESHOLD
+            ctx._hotmail007_runtime_low_watermark = _HOTMAIL007_BATCH_LOW_WATER
+            hotmail.set_hotmail007_runtime_stop_event(stop_event)
+            hotmail.set_hotmail007_registration_started(False)
+            hotmail.set_hotmail007_remaining_tasks(
+                batch_count if batch_count and batch_count > 0 else None
+            )
+            if hotmail007_batch_remaining is not None:
+                def _get_hotmail007_remaining_tasks() -> int:
+                    with ctx._success_counter_lock:
+                        return max(0, int(hotmail007_batch_remaining[0]))
+                hotmail.set_hotmail007_remaining_tasks_getter(_get_hotmail007_remaining_tasks)
+            else:
+                hotmail.set_hotmail007_remaining_tasks_getter(None)
+
+            hotmail007_buyer_thread = hotmail.start_hotmail007_background_purchase_thread(
+                proxies=_build_hotmail007_provider_proxies(
+                    rotator,
+                    effective_single_proxy,
+                    resin_state=runtime_resin_state,
+                ),
+                stop_event=stop_event,
+            )
+            ready_stock = hotmail.wait_for_hotmail007_queue_ready(
+                _HOTMAIL007_START_THRESHOLD,
+                stop_event=stop_event,
+            )
+            if ready_stock < _HOTMAIL007_START_THRESHOLD:
+                stop_event.set()
+                return
+            print(f"[*] Hotmail007 裂变号池已达启动门槛: {ready_stock} / {_HOTMAIL007_START_THRESHOLD}")
+            hotmail.set_hotmail007_registration_started(True)
+        else:
+            _prepare_hotmail007_queue_stock(
+                batch_count=batch_count,
+                rotator=rotator,
+                effective_single_proxy=effective_single_proxy,
+                resin_state=runtime_resin_state,
+            )
+
         if batch_count and batch_count > 0:
             _run_batch_mode(
                 batch_count=batch_count,
@@ -951,6 +1199,7 @@ def main() -> None:
                 sleep_min=sleep_min,
                 sleep_max=sleep_max,
                 stop_event=stop_event,
+                remaining=hotmail007_batch_remaining,
             )
         else:
             _run_loop_mode(
@@ -963,4 +1212,8 @@ def main() -> None:
             )
     finally:
         stop_event.set()
+        hotmail.notify_hotmail007_runtime_change()
+        if hotmail007_buyer_thread:
+            hotmail007_buyer_thread.join(timeout=5)
+        _reset_hotmail007_async_runtime()
         stats_thread.join(timeout=2)
