@@ -1,4 +1,6 @@
 import hashlib
+import email
+from email.header import decode_header, make_header
 import random
 import re
 import string
@@ -99,13 +101,61 @@ def _mail_id(mail: dict) -> str:
 
 
 def _mail_content(mail: dict) -> str:
-    parts = [
-        str(mail.get("subject") or "").strip(),
-        str(mail.get("raw") or "").strip(),
-        str(mail.get("text") or mail.get("textBody") or "").strip(),
-        str(mail.get("html") or mail.get("htmlBody") or "").strip(),
-        str(mail.get("body") or mail.get("content") or "").strip(),
-    ]
+    raw = str(mail.get("raw") or "").strip()
+    parts = []
+
+    subject = str(mail.get("subject") or "").strip()
+    if subject:
+        try:
+            subject = str(make_header(decode_header(subject)))
+        except Exception:
+            pass
+        parts.append(subject)
+
+    if raw:
+        try:
+            message = email.message_from_string(raw)
+            decoded_subject = str(make_header(decode_header(message.get("Subject", "")))).strip()
+            if decoded_subject and decoded_subject not in parts:
+                parts.append(decoded_subject)
+
+            if message.is_multipart():
+                for part in message.walk():
+                    if part.get_content_maintype() == "multipart":
+                        continue
+                    payload = part.get_payload(decode=True)
+                    if payload is None:
+                        raw_payload = part.get_payload()
+                        if isinstance(raw_payload, str) and raw_payload.strip():
+                            parts.append(raw_payload.strip())
+                        continue
+                    charset = part.get_content_charset() or "utf-8"
+                    try:
+                        decoded = payload.decode(charset, errors="ignore").strip()
+                    except Exception:
+                        decoded = payload.decode("utf-8", errors="ignore").strip()
+                    if decoded:
+                        parts.append(decoded)
+            else:
+                payload = message.get_payload(decode=True)
+                if payload:
+                    charset = message.get_content_charset() or "utf-8"
+                    try:
+                        decoded = payload.decode(charset, errors="ignore").strip()
+                    except Exception:
+                        decoded = payload.decode("utf-8", errors="ignore").strip()
+                    if decoded:
+                        parts.append(decoded)
+        except Exception:
+            parts.append(raw)
+
+    parts.extend(
+        [
+            str(mail.get("text") or mail.get("textBody") or "").strip(),
+            str(mail.get("html") or mail.get("htmlBody") or "").strip(),
+            str(mail.get("body") or mail.get("content") or "").strip(),
+        ]
+    )
     return "\n".join(part for part in parts if part)
 
 

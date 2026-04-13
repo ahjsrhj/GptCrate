@@ -519,6 +519,10 @@ _luckmail_credentials: Dict[str, dict] = {}
 _file_write_lock = threading.Lock()
 _success_counter_lock = threading.Lock()
 _success_counter = 0
+_session_output_dir = ""
+_session_cpa_dir = ""
+_session_sub_dir = ""
+_session_accounts_file = ""
 
 _INVALID_ERRORS = {
     "account_deactivated", "invalid_api_key", "user_deactivated",

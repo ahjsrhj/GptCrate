@@ -182,6 +182,32 @@ class StartPyTests(unittest.TestCase):
             self.assertIn("MAIL_WORKER_BASE=https://worker.example.com", content)
             self.assertIn("MAIL_ADMIN_PASSWORD=secret", content)
 
+    def test_generate_env_preserves_other_mode_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):
+            with open(".env", "w", encoding="utf-8") as handle:
+                handle.write("LUCKMAIL_API_KEY=luck-key\n")
+                handle.write("HOTMAIL007_API_KEY=hot-key\n")
+                handle.write("LOCAL_OUTLOOK_MAIL_MODE=imap\n")
+                handle.write("MAIL_DOMAIN=old.example.com\n")
+
+            start.generate_env(
+                platform="cf",
+                api_key="",
+                count=1,
+                threads=1,
+                cf_domain="example.com",
+                cf_worker_base="https://worker.example.com",
+                cf_admin_password="secret",
+            )
+
+            with open(".env", "r", encoding="utf-8") as handle:
+                content = handle.read()
+
+            self.assertIn("LUCKMAIL_API_KEY=luck-key", content)
+            self.assertIn("HOTMAIL007_API_KEY=hot-key", content)
+            self.assertIn("LOCAL_OUTLOOK_MAIL_MODE=imap", content)
+            self.assertIn("MAIL_DOMAIN=example.com", content)
+
 
 if __name__ == "__main__":
     unittest.main()

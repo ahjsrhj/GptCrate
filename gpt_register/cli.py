@@ -2,10 +2,12 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from . import codex2api
@@ -174,10 +176,14 @@ def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> No
     timestamp = int(time.time())
     file_name = f"token_{fname_email}_{timestamp}.json"
     sub_file_name = f"sub_{fname_email}_{timestamp}.json"
-    if ctx.TOKEN_OUTPUT_DIR:
-        os.makedirs(ctx.TOKEN_OUTPUT_DIR, exist_ok=True)
-        file_name = os.path.join(ctx.TOKEN_OUTPUT_DIR, file_name)
-        sub_file_name = os.path.join(ctx.TOKEN_OUTPUT_DIR, sub_file_name)
+    cpa_root = ctx._session_cpa_dir or ctx.TOKEN_OUTPUT_DIR
+    sub_root = ctx._session_sub_dir or ctx.TOKEN_OUTPUT_DIR
+    if cpa_root:
+        os.makedirs(cpa_root, exist_ok=True)
+        file_name = os.path.join(cpa_root, file_name)
+    if sub_root:
+        os.makedirs(sub_root, exist_ok=True)
+        sub_file_name = os.path.join(sub_root, sub_file_name)
 
     with ctx._file_write_lock:
         with open(file_name, "w", encoding="utf-8") as f:
@@ -207,7 +213,11 @@ def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> No
             _safe_print(f"[*] 本地 token 文件已删除: {file_name}")
 
     if account_email and password:
-        accounts_file = os.path.join(ctx.TOKEN_OUTPUT_DIR, "accounts.txt") if ctx.TOKEN_OUTPUT_DIR else "./tokens/accounts.txt"
+        accounts_file = ctx._session_accounts_file or (
+            os.path.join(ctx.TOKEN_OUTPUT_DIR, "accounts.txt")
+            if ctx.TOKEN_OUTPUT_DIR
+            else "./tokens/accounts.txt"
+        )
         output_dir = os.path.dirname(accounts_file) or "."
         with ctx._file_write_lock:
             os.makedirs(output_dir, exist_ok=True)
@@ -340,6 +350,43 @@ def _prepare_file_email_queue() -> None:
         print(f"[*] 从 {ctx.ACCOUNTS_FILE} 加载了 {len(ctx._email_queue)} 个本地 Outlook 账号")
     else:
         print(f"[*] 从 {ctx.ACCOUNTS_FILE} 加载了 {len(ctx._email_queue)} 个邮箱")
+
+
+def _prepare_output_session() -> None:
+    base_dir = Path(ctx.TOKEN_OUTPUT_DIR or "./tokens")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    archive_root = base_dir / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+
+    legacy_cpa = sorted(base_dir.glob("token_*.json"))
+    legacy_sub = sorted(base_dir.glob("sub_*.json"))
+    legacy_accounts = base_dir / "accounts.txt"
+    has_legacy = bool(legacy_cpa or legacy_sub or legacy_accounts.exists())
+    if has_legacy:
+        archive_dir = archive_root / f"legacy_{time.strftime('%Y%m%d_%H%M%S')}"
+        cpa_archive = archive_dir / "cpa"
+        sub_archive = archive_dir / "sub"
+        cpa_archive.mkdir(parents=True, exist_ok=True)
+        sub_archive.mkdir(parents=True, exist_ok=True)
+        for path in legacy_cpa:
+            shutil.move(str(path), cpa_archive / path.name)
+        for path in legacy_sub:
+            shutil.move(str(path), sub_archive / path.name)
+        if legacy_accounts.exists():
+            shutil.move(str(legacy_accounts), archive_dir / "accounts.txt")
+        _safe_print(f"[*] 已归档旧 token 到: {archive_dir}")
+
+    run_dir = base_dir / f"run_{time.strftime('%Y%m%d_%H%M%S')}"
+    cpa_dir = run_dir / "cpa"
+    sub_dir = run_dir / "sub"
+    cpa_dir.mkdir(parents=True, exist_ok=True)
+    sub_dir.mkdir(parents=True, exist_ok=True)
+
+    ctx._session_output_dir = str(run_dir)
+    ctx._session_cpa_dir = str(cpa_dir)
+    ctx._session_sub_dir = str(sub_dir)
+    ctx._session_accounts_file = str(run_dir / "accounts.txt")
+    _safe_print(f"[*] 本轮输出目录: {run_dir}")
 
 
 def _apply_cli_overrides(args: argparse.Namespace) -> None:
@@ -792,6 +839,7 @@ def main() -> None:
     # 初始化注册统计
     ctx._reg_stats = ctx.RegistrationStats()
     ctx._success_counter = 0
+    _prepare_output_session()
     stop_event = threading.Event()
     stats_thread = _start_stats_thread(stop_event)
     _print_status_snapshot(force=True)

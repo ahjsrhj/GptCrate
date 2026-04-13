@@ -63,6 +63,35 @@ class CfMailTests(unittest.TestCase):
 
         self.assertEqual(code, "654321")
 
+    def test_get_oai_code_decodes_multipart_raw_email(self):
+        ctx.MAIL_WORKER_BASE = "https://worker.example.com"
+        ctx.MAIL_ADMIN_PASSWORD = "secret"
+
+        raw_mail = (
+            "Subject: =?UTF-8?Q?Your_ChatGPT_code?=\r\n"
+            "MIME-Version: 1.0\r\n"
+            "Content-Type: multipart/alternative; boundary=\"abc\"\r\n"
+            "\r\n"
+            "--abc\r\n"
+            "Content-Type: text/plain; charset=UTF-8\r\n"
+            "Content-Transfer-Encoding: quoted-printable\r\n"
+            "\r\n"
+            "Your ChatGPT code is 755838\r\n"
+            "--abc--\r\n"
+        )
+
+        with mock.patch.object(
+            cf_mail.requests,
+            "get",
+            return_value=_FakeResponse(
+                status_code=200,
+                payload={"results": [{"id": "m2", "raw": raw_mail}]},
+            ),
+        ), mock.patch.object(cf_mail.time, "sleep", return_value=None):
+            code = cf_mail.get_oai_code("user@example.com")
+
+        self.assertEqual(code, "755838")
+
     def test_generate_email_returns_empty_when_domain_missing(self):
         ctx.MAIL_DOMAIN = ""
 

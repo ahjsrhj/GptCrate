@@ -54,16 +54,17 @@ def print_banner() -> None:
     print()
 
 def select_platform() -> str:
-    print("请选择邮箱平台:")
-    print("  1. LuckMail (推荐 - 自动接码，省心省力)")
-    print("  2. Hotmail007 (需要已有微软邮箱)")
-    print("  3. 本地 Outlook 导入 (使用 邮箱----密码----client_id----刷新令牌)")
-    print("  4. 自建邮箱 / Cloudflare Worker")
+    print("请选择功能:")
+    print("  1. LuckMail 注册")
+    print("  2. Hotmail007 注册")
+    print("  3. 本地 Outlook 导入注册")
+    print("  4. 自建邮箱 / Cloudflare Worker 注册")
+    print("  5. 微软邮箱多别名生成器")
     print()
     return _prompt_choice(
-        "请输入选项 (1/2/3/4): ",
-        {"1": "luckmail", "2": "hotmail007", "3": "local_outlook", "4": "cf"},
-        "无效选项，请输入 1、2、3 或 4",
+        "请输入选项 (1/2/3/4/5): ",
+        {"1": "luckmail", "2": "hotmail007", "3": "local_outlook", "4": "cf", "5": "alias_generator"},
+        "无效选项，请输入 1、2、3、4 或 5",
     )
 
 def select_luckmail_mode() -> str:
@@ -180,6 +181,11 @@ def get_threads() -> int:
     print("(建议 1-5，太高可能容易被封)")
     return _prompt_positive_int("请输入线程数 (默认 1): ", default=1)
 
+
+def _env_or_default(key: str, default: str = "") -> str:
+    value = _read_env_value(".env", key)
+    return value if value is not None else default
+
 def generate_env(
     platform: str,
     api_key: str,
@@ -192,27 +198,61 @@ def generate_env(
     cf_worker_base: str = "",
     cf_admin_password: str = "",
 ) -> None:
-    codex2api_base_url = _read_env_value(".env", "CODEX2API_BASE_URL") or ""
-    codex2api_admin_secret = _read_env_value(".env", "CODEX2API_ADMIN_SECRET") or ""
-    resin_url = _read_env_value(".env", "RESIN_URL") or ""
-    resin_platform_name = _read_env_value(".env", "RESIN_PLATFORM_NAME") or ""
     batch_count_line = f"BATCH_COUNT={count}" if count else "# BATCH_COUNT=10"
     batch_threads_line = f"BATCH_THREADS={threads}"
-    env_content = f"""MAIL_DOMAIN={cf_domain}
-MAIL_WORKER_BASE={cf_worker_base}
-MAIL_ADMIN_PASSWORD={cf_admin_password}
-TOKEN_OUTPUT_DIR=./tokens
-CLI_PROXY_AUTHS_DIR=
+    values = {
+        "MAIL_DOMAIN": _env_or_default("MAIL_DOMAIN"),
+        "MAIL_WORKER_BASE": _env_or_default("MAIL_WORKER_BASE"),
+        "MAIL_ADMIN_PASSWORD": _env_or_default("MAIL_ADMIN_PASSWORD"),
+        "TOKEN_OUTPUT_DIR": _env_or_default("TOKEN_OUTPUT_DIR", "./tokens"),
+        "CLI_PROXY_AUTHS_DIR": _env_or_default("CLI_PROXY_AUTHS_DIR"),
+        "CODEX2API_BASE_URL": _env_or_default("CODEX2API_BASE_URL"),
+        "CODEX2API_ADMIN_SECRET": _env_or_default("CODEX2API_ADMIN_SECRET"),
+        "RESIN_URL": _env_or_default("RESIN_URL"),
+        "RESIN_PLATFORM_NAME": _env_or_default("RESIN_PLATFORM_NAME"),
+        "PROXY_FILE": _env_or_default("PROXY_FILE", "proxies.txt"),
+        "ACCOUNTS_FILE": _env_or_default("ACCOUNTS_FILE", "accounts.txt"),
+        "HOTMAIL007_API_URL": _env_or_default("HOTMAIL007_API_URL", "https://gapi.hotmail007.com"),
+        "HOTMAIL007_API_KEY": _env_or_default("HOTMAIL007_API_KEY"),
+        "HOTMAIL007_MAIL_TYPE": _env_or_default("HOTMAIL007_MAIL_TYPE", "hotmail Trusted Graph"),
+        "HOTMAIL007_MAIL_MODE": _env_or_default("HOTMAIL007_MAIL_MODE", "imap"),
+        "HOTMAIL007_MAX_RETRY": _env_or_default("HOTMAIL007_MAX_RETRY", "3"),
+        "LUCKMAIL_API_URL": _env_or_default("LUCKMAIL_API_URL", "https://mails.luckyous.com/api/v1/openapi"),
+        "LUCKMAIL_API_KEY": _env_or_default("LUCKMAIL_API_KEY"),
+        "LUCKMAIL_EMAIL_TYPE": _env_or_default("LUCKMAIL_EMAIL_TYPE", "ms_imap"),
+        "LUCKMAIL_AUTO_BUY": _env_or_default("LUCKMAIL_AUTO_BUY", "true"),
+        "LUCKMAIL_PURCHASED_ONLY": _env_or_default("LUCKMAIL_PURCHASED_ONLY", "false"),
+        "LUCKMAIL_SKIP_PURCHASED": _env_or_default("LUCKMAIL_SKIP_PURCHASED", "false"),
+        "LUCKMAIL_OWN_ONLY": _env_or_default("LUCKMAIL_OWN_ONLY", "false"),
+        "LUCKMAIL_CHECK_WORKERS": _env_or_default("LUCKMAIL_CHECK_WORKERS", "20"),
+        "LUCKMAIL_MAX_RETRY": _env_or_default("LUCKMAIL_MAX_RETRY", "3"),
+        "LOCAL_OUTLOOK_MAIL_MODE": _env_or_default("LOCAL_OUTLOOK_MAIL_MODE", "graph"),
+        "LOCAL_OUTLOOK_BAD_FILE": _env_or_default("LOCAL_OUTLOOK_BAD_FILE", "bad_local_outlook.txt"),
+    }
 
-# Codex2Api 同步配置（留空则禁用）
-CODEX2API_BASE_URL={codex2api_base_url}
-CODEX2API_ADMIN_SECRET={codex2api_admin_secret}
+    if platform == "cf":
+        values["MAIL_DOMAIN"] = cf_domain
+        values["MAIL_WORKER_BASE"] = cf_worker_base
+        values["MAIL_ADMIN_PASSWORD"] = cf_admin_password
+    elif platform == "hotmail007":
+        values["HOTMAIL007_API_KEY"] = api_key
+    elif platform == "local_outlook":
+        values["LOCAL_OUTLOOK_MAIL_MODE"] = local_outlook_mail_mode
+        values["LOCAL_OUTLOOK_BAD_FILE"] = "bad_local_outlook.txt"
 
-# Resin 粘性代理（配置后将忽略 PROXY_FILE）
-RESIN_URL={resin_url}
-RESIN_PLATFORM_NAME={resin_platform_name}
+    env_content = f"""MAIL_DOMAIN={values['MAIL_DOMAIN']}
+MAIL_WORKER_BASE={values['MAIL_WORKER_BASE']}
+MAIL_ADMIN_PASSWORD={values['MAIL_ADMIN_PASSWORD']}
+TOKEN_OUTPUT_DIR={values['TOKEN_OUTPUT_DIR']}
+CLI_PROXY_AUTHS_DIR={values['CLI_PROXY_AUTHS_DIR']}
 
-PROXY_FILE=proxies.txt
+CODEX2API_BASE_URL={values['CODEX2API_BASE_URL']}
+CODEX2API_ADMIN_SECRET={values['CODEX2API_ADMIN_SECRET']}
+
+RESIN_URL={values['RESIN_URL']}
+RESIN_PLATFORM_NAME={values['RESIN_PLATFORM_NAME']}
+
+PROXY_FILE={values['PROXY_FILE']}
 
 # 批量注册配置
 {batch_count_line}
@@ -220,7 +260,7 @@ PROXY_FILE=proxies.txt
 
 # 邮箱模式
 EMAIL_MODE={platform}
-ACCOUNTS_FILE=accounts.txt
+ACCOUNTS_FILE={values['ACCOUNTS_FILE']}
 """
 
     if platform == "luckmail":
@@ -253,7 +293,7 @@ ACCOUNTS_FILE=accounts.txt
 
         env_content += f"""
 # LuckMail 模式配置
-LUCKMAIL_API_URL=https://mails.luckyous.com/api/v1/openapi
+LUCKMAIL_API_URL={values['LUCKMAIL_API_URL']}
 LUCKMAIL_API_KEY={api_key}
 # 邮箱类型: ms_imap 或 ms_graph
 LUCKMAIL_EMAIL_TYPE={email_type}
@@ -266,30 +306,59 @@ LUCKMAIL_SKIP_PURCHASED={skip_purchased}
 # 只使用自己导入到 LuckMail 的邮箱（true=只读“我的邮箱”，用完停止）
 LUCKMAIL_OWN_ONLY={own_only}
 # 已购/预检测邮箱活跃度检测并发数
-LUCKMAIL_CHECK_WORKERS=20
+LUCKMAIL_CHECK_WORKERS={values['LUCKMAIL_CHECK_WORKERS']}
 # 邮箱不活跃时的最大重试次数
-LUCKMAIL_MAX_RETRY=3
-"""
-    elif platform == "hotmail007":
-        env_content += f"""
-# Hotmail007 模式配置
-HOTMAIL007_API_URL=https://gapi.hotmail007.com
-HOTMAIL007_API_KEY={api_key}
-HOTMAIL007_MAIL_TYPE=hotmail
-HOTMAIL007_MAIL_MODE=graph
-# 拉取邮箱失败时的最大重试次数
-HOTMAIL007_MAX_RETRY=3
-"""
-    elif platform == "cf":
-        env_content += """
-# 自建邮箱 / Cloudflare Worker 模式
+LUCKMAIL_MAX_RETRY={values['LUCKMAIL_MAX_RETRY']}
 """
     else:
+        env_content += f"""
+# LuckMail 模式配置
+LUCKMAIL_API_URL={values['LUCKMAIL_API_URL']}
+LUCKMAIL_API_KEY={values['LUCKMAIL_API_KEY']}
+# 邮箱类型: ms_imap 或 ms_graph
+LUCKMAIL_EMAIL_TYPE={values['LUCKMAIL_EMAIL_TYPE']}
+# 自动购买邮箱并检测活跃度（true=预检测/实时购买，false=接码模式）
+LUCKMAIL_AUTO_BUY={values['LUCKMAIL_AUTO_BUY']}
+# 只使用已购邮箱模式（true=只用已购邮箱，用完停止；false=允许购买新邮箱）
+LUCKMAIL_PURCHASED_ONLY={values['LUCKMAIL_PURCHASED_ONLY']}
+# 跳过已购邮箱检查（true=跳过已购邮箱直接购买新邮箱；false=先检查已购邮箱）
+LUCKMAIL_SKIP_PURCHASED={values['LUCKMAIL_SKIP_PURCHASED']}
+# 只使用自己导入到 LuckMail 的邮箱（true=只读“我的邮箱”，用完停止）
+LUCKMAIL_OWN_ONLY={values['LUCKMAIL_OWN_ONLY']}
+# 已购/预检测邮箱活跃度检测并发数
+LUCKMAIL_CHECK_WORKERS={values['LUCKMAIL_CHECK_WORKERS']}
+# 邮箱不活跃时的最大重试次数
+LUCKMAIL_MAX_RETRY={values['LUCKMAIL_MAX_RETRY']}
+"""
+
+    if platform == "hotmail007":
+        hotmail_key = api_key
+    else:
+        hotmail_key = values["HOTMAIL007_API_KEY"]
+    env_content += f"""
+# Hotmail007 模式配置
+HOTMAIL007_API_URL={values['HOTMAIL007_API_URL']}
+HOTMAIL007_API_KEY={hotmail_key}
+HOTMAIL007_MAIL_TYPE={values['HOTMAIL007_MAIL_TYPE']}
+HOTMAIL007_MAIL_MODE={values['HOTMAIL007_MAIL_MODE']}
+HOTMAIL007_MAX_RETRY={values['HOTMAIL007_MAX_RETRY']}
+"""
+    env_content += """
+# 自建邮箱 / Cloudflare Worker 模式
+"""
+    if platform == "local_outlook":
         env_content += f"""
 # 本地 Outlook 导入模式
 # accounts.txt 每行格式: 邮箱----密码----client_id----refresh_token
 LOCAL_OUTLOOK_MAIL_MODE={local_outlook_mail_mode}
 LOCAL_OUTLOOK_BAD_FILE=bad_local_outlook.txt
+"""
+    else:
+        env_content += f"""
+# 本地 Outlook 导入模式
+# accounts.txt 每行格式: 邮箱----密码----client_id----refresh_token
+LOCAL_OUTLOOK_MAIL_MODE={values['LOCAL_OUTLOOK_MAIL_MODE']}
+LOCAL_OUTLOOK_BAD_FILE={values['LOCAL_OUTLOOK_BAD_FILE']}
 """
 
     with open(".env", "w", encoding="utf-8") as f:
@@ -310,6 +379,15 @@ def run_gpt(count: Optional[int], threads: int) -> None:
     
     os.execv(sys.executable, [sys.executable] + cmd)
 
+
+def run_alias_generator() -> None:
+    from gpt_register.alias_generator import run_interactive
+
+    print("\n" + "=" * 50)
+    print("启动微软邮箱多别名生成器...")
+    print("=" * 50 + "\n")
+    raise SystemExit(run_interactive())
+
 def main() -> None:
     print_banner()
 
@@ -324,6 +402,9 @@ def main() -> None:
 
     # 选择平台
     platform = select_platform()
+
+    if platform == "alias_generator":
+        run_alias_generator()
 
     # LuckMail 额外选项
     luckmail_mode = "prefetch"

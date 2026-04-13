@@ -13,6 +13,20 @@
 - `local_outlook`：本地导入 Outlook 凭据
 - `hotmail007`：Hotmail007 API
 
+当前还提供一个 **Web UI（实验版）**：
+
+- 入口：`python web_ui.py`
+- 能力：配置切换、任务启动/停止、日志查看、CLIProxyAPI 导入
+- **当前建议优先使用终端版**（`start.py` / `gpt.py`），Web UI 仍在持续改进中
+
+终端版已新增 **微软邮箱多别名生成器**：
+
+- 入口 1：`uv run python start.py` 后选择 `微软邮箱多别名生成器`
+- 入口 2：`uv run python alias_generator.py`
+- 支持 `hotmail.*` / `outlook.*` 邮箱
+- 支持保留原字段、打乱输出、可选从源文件移除已处理原邮箱
+- 支持**直接覆盖 `accounts.txt`**（会自动创建 `.bak` 备份）
+
 ---
 
 > 默认推荐方案：`LuckMail`
@@ -88,6 +102,20 @@ uv run python start.py
 
 推荐优先用 `start.py` 生成 `.env`，再按需手工微调。
 
+如需体验 Web UI（实验版）：
+
+```bash
+uv run python web_ui.py
+```
+
+默认地址：
+
+```text
+http://127.0.0.1:8765
+```
+
+> 说明：Web UI 目前可用，但交互和导入流程仍在持续打磨；如果你追求稳定性，建议优先使用终端版。
+
 ---
 
 ## 环境要求
@@ -118,6 +146,8 @@ pip install curl_cffi
 | ------------- | --------------------------------- |
 | `gpt.py`      | 主程序                                                     |
 | `start.py`    | 一键启动器（带交互式配置，支持 4 种邮箱模式）              |
+| `alias_generator.py` | 微软邮箱多别名生成器（终端版）                       |
+| `web_ui.py`   | Web UI 启动入口（实验版，本地面板）                        |
 | `.env`        | 配置文件 (邮箱、代理、输出路径等)                          |
 | `accounts.txt`| 输入账号文件；`file`/`local_outlook` 模式会读取它          |
 | `proxies.txt` | 代理列表文件 (每行一个代理)                                |
@@ -475,6 +505,44 @@ CODEX2API_ADMIN_SECRET=your-admin-secret
 uv run python gpt.py --count 1 --threads 1
 ```
 
+### 11. 微软邮箱多别名生成器
+
+支持将：
+
+```txt
+email----password----client_id----refresh_token
+```
+
+批量转换为：
+
+```txt
+email+suffix----password----client_id----refresh_token
+```
+
+使用方式：
+
+```bash
+uv run python alias_generator.py --input accounts.txt --per-email 5 --overwrite-accounts
+```
+
+也可以直接：
+
+```bash
+uv run python start.py
+```
+
+然后选择：
+
+```text
+5. 微软邮箱多别名生成器
+```
+
+推荐直接覆盖 `accounts.txt`：
+
+- 生成结果会直接写回 `accounts.txt`
+- 原始输入会自动备份为 `accounts.txt.bak`
+- 后续 `local_outlook` / `file` 模式本来就是从 `accounts.txt` 读取，因此生成后可直接跑注册
+
 ---
 
 ## 输出示例
@@ -542,3 +610,5 @@ uv run python gpt.py --count 1 --threads 1
 8. 排查 LuckMail 收不到验证码时，可临时开启 `LUCKMAIL_MAIL_DEBUG=true` 查看 `token/mails` 摘要、最近邮件主题与 fallback 状态
 9. `local_outlook` 模式下，`accounts.txt` 读取后会被消费；失效号会追加到 `LOCAL_OUTLOOK_BAD_FILE`
 10. `cf` 模式下如果收不到验证码，优先检查 `MAIL_WORKER_BASE` 是否包含协议（例如 `https://`）以及 `/admin/mails` 是否能返回目标邮箱邮件
+11. Web UI 当前属于**实验版**，建议用于辅助查看与导入；批量注册、稳定运行、问题排查仍推荐优先使用终端版
+12. 多别名生成器当前默认只处理 `@hotmail.*` 和 `@outlook.*`，其他域名会自动跳过
