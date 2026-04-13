@@ -218,6 +218,7 @@ def generate_env(
         "HOTMAIL007_MAIL_TYPE": _env_or_default("HOTMAIL007_MAIL_TYPE", "hotmail"),
         "HOTMAIL007_MAIL_MODE": _env_or_default("HOTMAIL007_MAIL_MODE", "graph"),
         "HOTMAIL007_ALIAS_SPLIT_ENABLED": _env_or_default("HOTMAIL007_ALIAS_SPLIT_ENABLED", "false"),
+        "HOTMAIL007_QUEUE_FILE": _env_or_default("HOTMAIL007_QUEUE_FILE", "hotmail007.txt"),
         "HOTMAIL007_MAX_RETRY": _env_or_default("HOTMAIL007_MAX_RETRY", "3"),
         "LUCKMAIL_API_URL": _env_or_default("LUCKMAIL_API_URL", "https://mails.luckyous.com/api/v1/openapi"),
         "LUCKMAIL_API_KEY": _env_or_default("LUCKMAIL_API_KEY"),
@@ -345,6 +346,7 @@ HOTMAIL007_API_KEY={hotmail_key}
 HOTMAIL007_MAIL_TYPE={values['HOTMAIL007_MAIL_TYPE']}
 HOTMAIL007_MAIL_MODE={values['HOTMAIL007_MAIL_MODE']}
 HOTMAIL007_ALIAS_SPLIT_ENABLED={values['HOTMAIL007_ALIAS_SPLIT_ENABLED']}
+HOTMAIL007_QUEUE_FILE={values['HOTMAIL007_QUEUE_FILE']}
 HOTMAIL007_MAX_RETRY={values['HOTMAIL007_MAX_RETRY']}
 """
     env_content += """

@@ -251,9 +251,16 @@ def hotmail007_get_mail(quantity: int = 1, proxies: Any = None) -> tuple:
     return out, ""
 
 
-def _get_hotmail007_queue() -> ctx.ActiveEmailQueue:
+def _hotmail007_persistent_queue_enabled() -> bool:
+    return ctx.EMAIL_MODE == "hotmail007" and ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED
+
+
+def _get_hotmail007_queue() -> Any:
     if ctx._hotmail007_queue is None:
-        ctx._hotmail007_queue = ctx.ActiveEmailQueue()
+        if _hotmail007_persistent_queue_enabled():
+            ctx._hotmail007_queue = ctx.Hotmail007FileQueue(ctx.HOTMAIL007_QUEUE_FILE)
+        else:
+            ctx._hotmail007_queue = ctx.ActiveEmailQueue()
     return ctx._hotmail007_queue
 
 
@@ -310,30 +317,82 @@ def _fetch_hotmail007_account_with_retry(proxies: Any = None) -> dict | None:
         print(f"[*] Hotmail007 拉取邮箱失败，立即重试 ({fetch_retry}/{max_retry})...")
 
 
-def _pop_hotmail007_queue_account(proxies: Any = None) -> tuple[dict | None, int]:
+def _add_hotmail007_accounts_to_queue(queue: Any, queue_accounts: list[dict], primary_email: str) -> int:
+    if not queue_accounts:
+        return 0
+    if _hotmail007_persistent_queue_enabled():
+        added = queue.add_batch_randomized(queue_accounts)
+        print(
+            f"[*] Hotmail007 购买成功，已将 {primary_email} 裂变为 "
+            f"{added} 个别名并随机写入队列文件 {ctx.HOTMAIL007_QUEUE_FILE}"
+        )
+        return added
+
+    queue.add_batch(queue_accounts)
+    if ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED:
+        print(
+            f"[*] Hotmail007 购买成功，已将 {primary_email} 裂变为 "
+            f"{len(queue_accounts)} 个别名并加入内存队列"
+        )
+    else:
+        print(f"[*] Hotmail007 购买成功，已将 {primary_email} 加入队列")
+    return len(queue_accounts)
+
+
+def ensure_hotmail007_queue_capacity(target_size: int, proxies: Any = None) -> int:
+    if target_size <= 0:
+        return len(_get_hotmail007_queue())
+
     queue = _get_hotmail007_queue()
     with _HOTMAIL007_QUEUE_LOCK:
-        account = queue.pop()
-        if account is None:
-            print("[*] Hotmail007 队列为空，开始购买新邮箱补货...")
+        while len(queue) < target_size:
+            print(f"[*] Hotmail007 队列库存不足，开始补货... 当前 {len(queue)} / 目标 {target_size}")
             mail_info = _fetch_hotmail007_account_with_retry(proxies=proxies)
             if not mail_info:
-                return None, 0
-
+                break
             queue_accounts = _build_hotmail007_queue_accounts(mail_info)
             if not queue_accounts:
-                return None, 0
-            queue.add_batch(queue_accounts)
+                break
+            _add_hotmail007_accounts_to_queue(
+                queue,
+                queue_accounts,
+                str(mail_info.get("email") or "").strip() or "unknown",
+            )
+        return len(queue)
 
-            if ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED:
-                print(
-                    f"[*] Hotmail007 购买成功，已将 {mail_info['email']} 裂变为 "
-                    f"{len(queue_accounts)} 个别名并加入队列"
-                )
-            else:
-                print(f"[*] Hotmail007 购买成功，已将 {mail_info['email']} 加入队列")
 
+def get_hotmail007_queue_size() -> int:
+    return len(_get_hotmail007_queue())
+
+
+def _pop_hotmail007_queue_account(proxies: Any = None) -> tuple[dict | None, int]:
+    queue = _get_hotmail007_queue()
+    if _hotmail007_persistent_queue_enabled() and len(queue) == 0:
+        ensure_hotmail007_queue_capacity(1, proxies=proxies)
+
+    with _HOTMAIL007_QUEUE_LOCK:
+        account = queue.pop()
+        remaining = len(queue)
+
+    if account is None and not _hotmail007_persistent_queue_enabled():
+        print("[*] Hotmail007 队列为空，开始购买新邮箱补货...")
+        mail_info = _fetch_hotmail007_account_with_retry(proxies=proxies)
+        if not mail_info:
+            return None, 0
+        queue_accounts = _build_hotmail007_queue_accounts(mail_info)
+        if not queue_accounts:
+            return None, 0
+        with _HOTMAIL007_QUEUE_LOCK:
+            _add_hotmail007_accounts_to_queue(
+                queue,
+                queue_accounts,
+                str(mail_info.get("email") or "").strip() or "unknown",
+            )
             account = queue.pop()
+            remaining = len(queue)
+
+    if account and _hotmail007_persistent_queue_enabled() and ctx._hotmail007_runtime_loop_mode and remaining <= 20:
+        ensure_hotmail007_queue_capacity(21, proxies=proxies)
         remaining = len(queue)
     return account, remaining
 

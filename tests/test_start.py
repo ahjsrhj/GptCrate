@@ -196,6 +196,7 @@ class StartPyTests(unittest.TestCase):
             self.assertIn("HOTMAIL007_MAIL_TYPE=hotmail", content)
             self.assertIn("HOTMAIL007_MAIL_MODE=graph", content)
             self.assertIn("HOTMAIL007_ALIAS_SPLIT_ENABLED=false", content)
+            self.assertIn("HOTMAIL007_QUEUE_FILE=hotmail007.txt", content)
 
     def test_generate_env_supports_cf_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir, chdir(temp_dir):

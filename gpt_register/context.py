@@ -55,6 +55,7 @@ HOTMAIL007_API_KEY = os.getenv("HOTMAIL007_API_KEY", "").strip()
 HOTMAIL007_MAIL_TYPE = os.getenv("HOTMAIL007_MAIL_TYPE", "outlook").strip()
 HOTMAIL007_MAIL_MODE = os.getenv("HOTMAIL007_MAIL_MODE", "graph").strip().lower()
 HOTMAIL007_ALIAS_SPLIT_ENABLED = os.getenv("HOTMAIL007_ALIAS_SPLIT_ENABLED", "false").strip().lower() == "true"
+HOTMAIL007_QUEUE_FILE = os.getenv("HOTMAIL007_QUEUE_FILE", "hotmail007.txt").strip() or "hotmail007.txt"
 try:
     HOTMAIL007_MAX_RETRY = max(1, int(os.getenv("HOTMAIL007_MAX_RETRY", "3").strip()))
 except ValueError:
@@ -580,9 +581,114 @@ class ActiveEmailQueue:
             return len(self._emails) == 0
 
 
+class Hotmail007FileQueue:
+    """线程安全的 Hotmail007 裂变邮箱持久化队列。"""
+
+    _DELIMITER = "----"
+    _FIELD_COUNT = 6
+
+    def __init__(self, filepath: str):
+        self._filepath = filepath
+        self._emails: List[dict] = []
+        self._lock = threading.Lock()
+        self._load()
+
+    @property
+    def filepath(self) -> str:
+        return self._filepath
+
+    def _load(self) -> None:
+        if not os.path.exists(self._filepath):
+            return
+        with open(self._filepath, "r", encoding="utf-8") as handle:
+            for raw in handle:
+                account = self._parse_line(raw)
+                if account:
+                    self._emails.append(account)
+
+    def _parse_line(self, raw: str) -> Optional[dict]:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            return None
+        parts = [part.strip() for part in line.split(self._DELIMITER, self._FIELD_COUNT - 1)]
+        if len(parts) != self._FIELD_COUNT:
+            return None
+        alias_email, primary_email, password, client_id, mail_mode, refresh_token = parts
+        if not alias_email or "@" not in alias_email:
+            return None
+        if not primary_email or "@" not in primary_email:
+            return None
+        if not client_id or not refresh_token:
+            return None
+        return {
+            "email": alias_email,
+            "primary_email": primary_email,
+            "password": password,
+            "client_id": client_id,
+            "mail_mode": mail_mode,
+            "refresh_token": refresh_token,
+        }
+
+    def _format_line(self, account: dict) -> str:
+        return self._DELIMITER.join(
+            [
+                str(account.get("email") or "").strip(),
+                str(account.get("primary_email") or "").strip(),
+                str(account.get("password") or "").strip(),
+                str(account.get("client_id") or "").strip(),
+                str(account.get("mail_mode") or "").strip(),
+                str(account.get("refresh_token") or "").strip(),
+            ]
+        )
+
+    def _save_unlocked(self) -> None:
+        directory = os.path.dirname(self._filepath)
+        try:
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(self._filepath, "w", encoding="utf-8") as handle:
+                for account in self._emails:
+                    handle.write(self._format_line(account) + "\n")
+        except Exception:
+            pass
+
+    def pop(self) -> Optional[dict]:
+        with self._lock:
+            if not self._emails:
+                return None
+            account = self._emails.pop(0)
+            self._save_unlocked()
+            return account
+
+    def add_batch_randomized(self, accounts: list[dict]) -> int:
+        valid_accounts = []
+        for account in accounts or []:
+            formatted = self._format_line(account)
+            parsed = self._parse_line(formatted)
+            if parsed:
+                valid_accounts.append(parsed)
+        if not valid_accounts:
+            return 0
+        randomized_accounts = list(valid_accounts)
+        random.shuffle(randomized_accounts)
+        with self._lock:
+            for account in randomized_accounts:
+                insert_at = random.randint(0, len(self._emails))
+                self._emails.insert(insert_at, account)
+            self._save_unlocked()
+            return len(randomized_accounts)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._emails)
+
+    def is_empty(self) -> bool:
+        return len(self) == 0
+
+
 _email_queue: Optional[EmailQueue] = None
 _active_email_queue: Optional[ActiveEmailQueue] = None
-_hotmail007_queue: Optional[ActiveEmailQueue] = None
+_hotmail007_queue: Optional[object] = None
 _prefetch_no_stock = False
 _prefetch_lock = threading.Lock()
 _luckmail_purchased_only = False
@@ -601,6 +707,8 @@ _session_output_dir = ""
 _session_cpa_dir = ""
 _session_sub_dir = ""
 _session_accounts_file = ""
+_hotmail007_runtime_batch_target: Optional[int] = None
+_hotmail007_runtime_loop_mode = False
 
 _INVALID_ERRORS = {
     "account_deactivated", "invalid_api_key", "user_deactivated",

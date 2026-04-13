@@ -13,6 +13,7 @@ from typing import Optional
 
 from . import codex2api
 from . import context as ctx
+from . import hotmail
 from . import mail, oauth, register
 from . import sub_format
 
@@ -315,6 +316,9 @@ def _resolve_mode_label() -> str:
         if ctx.LUCKMAIL_PURCHASED_ONLY:
             return "LuckMail API (已购邮箱)"
         return "LuckMail API (hotmail邮箱)"
+    if ctx.EMAIL_MODE == "hotmail007" and ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED:
+        queue_size = hotmail.get_hotmail007_queue_size()
+        return f"Hotmail007 裂变队列 ({ctx.HOTMAIL007_QUEUE_FILE}, 库存 {queue_size} 个)"
     return "Hotmail007 API (微软邮箱)"
 
 
@@ -424,6 +428,9 @@ def _prepare_output_session() -> None:
 
 
 def _apply_cli_overrides(args: argparse.Namespace) -> None:
+    ctx._hotmail007_queue = None
+    ctx._hotmail007_runtime_batch_target = None
+    ctx._hotmail007_runtime_loop_mode = False
     if args.email_mode:
         ctx.EMAIL_MODE = args.email_mode.strip().lower()
     if args.accounts_file:
@@ -443,6 +450,45 @@ def _apply_cli_overrides(args: argparse.Namespace) -> None:
         ctx.LUCKMAIL_AUTO_BUY = True
     if args.luckmail_max_retry is not None and args.luckmail_max_retry > 0:
         ctx.LUCKMAIL_MAX_RETRY = args.luckmail_max_retry
+
+
+def _hotmail007_persistent_queue_enabled() -> bool:
+    return ctx.EMAIL_MODE == "hotmail007" and ctx.HOTMAIL007_ALIAS_SPLIT_ENABLED
+
+
+def _prepare_hotmail007_queue_stock(
+    *,
+    batch_count: Optional[int],
+    rotator: ctx.ProxyRotator,
+    effective_single_proxy: Optional[str],
+    resin_state: Optional[ctx.ResinRunState] = None,
+) -> None:
+    if not _hotmail007_persistent_queue_enabled():
+        ctx._hotmail007_runtime_batch_target = None
+        ctx._hotmail007_runtime_loop_mode = False
+        return
+
+    provider_proxy = effective_single_proxy or (rotator.next() if len(rotator) > 0 else None)
+    provider_proxies = ctx.build_proxies(provider_proxy, resin_state=resin_state)
+    if batch_count and batch_count > 0:
+        ctx._hotmail007_runtime_batch_target = batch_count
+        ctx._hotmail007_runtime_loop_mode = False
+        before = hotmail.get_hotmail007_queue_size()
+        after = hotmail.ensure_hotmail007_queue_capacity(batch_count, proxies=provider_proxies)
+        print(
+            f"[*] Hotmail007 裂变队列预补货完成: {before} -> {after} "
+            f"(目标 {batch_count}, 文件 {ctx.HOTMAIL007_QUEUE_FILE})"
+        )
+        return
+
+    ctx._hotmail007_runtime_batch_target = None
+    ctx._hotmail007_runtime_loop_mode = True
+    before = hotmail.get_hotmail007_queue_size()
+    after = hotmail.ensure_hotmail007_queue_capacity(21, proxies=provider_proxies)
+    print(
+        f"[*] Hotmail007 裂变队列循环模式保底完成: {before} -> {after} "
+        f"(目标至少 21, 文件 {ctx.HOTMAIL007_QUEUE_FILE})"
+    )
 
 
 def _resolve_thread_count(cli_thread_count: int) -> int:
@@ -879,6 +925,13 @@ def main() -> None:
 
     if args.once and not batch_count:
         batch_count = 1
+
+    _prepare_hotmail007_queue_stock(
+        batch_count=batch_count,
+        rotator=rotator,
+        effective_single_proxy=effective_single_proxy,
+        resin_state=runtime_resin_state,
+    )
 
     # 初始化注册统计
     ctx._reg_stats = ctx.RegistrationStats()

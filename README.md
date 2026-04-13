@@ -236,6 +236,8 @@ HOTMAIL007_MAIL_TYPE=outlook-premium
 HOTMAIL007_MAIL_MODE=imap
 # 是否开启邮箱裂变（true=购买 1 个原始邮箱后裂变成 5 个别名并依次使用）
 HOTMAIL007_ALIAS_SPLIT_ENABLED=false
+# 裂变子邮箱库存队列文件
+HOTMAIL007_QUEUE_FILE=hotmail007.txt
 # 拉取邮箱失败时的最大重试次数
 HOTMAIL007_MAX_RETRY=3
 # 可选：仅 Hotmail007 / Outlook 相关 HTTP 请求走这个代理
@@ -243,7 +245,12 @@ OUTLOOK_PROXY=http://127.0.0.1:7890
 ```
 
 `HOTMAIL007_MAIL_MODE` 支持 `graph` (Microsoft Graph API) 和 `imap` (IMAP 协议) 两种收信方式。
-- `HOTMAIL007_ALIAS_SPLIT_ENABLED=true` 时，程序会把购买到的 1 个原始微软邮箱裂变成 5 个 `local+随机6位@domain` 别名并加入内存队列
+- `HOTMAIL007_ALIAS_SPLIT_ENABLED=true` 时，程序会优先消费 `HOTMAIL007_QUEUE_FILE` 指向的库存文件，默认是项目根目录下的 `hotmail007.txt`
+- 裂变库存队列按文本文件持久化，消费时从文件头顺序读取，用掉一个就立刻从文件中删除，避免未用完的子邮箱丢失
+- 有限批量注册时，如果 `hotmail007.txt` 中的可用子邮箱数量不足本次注册数量，程序会继续购买并裂变，直到库存补足到当前注册数量
+- 无限模式运行时，程序会持续维持 `hotmail007.txt` 中的可用子邮箱数量大于 20；低于等于 20 时会补货
+- 每次新购买并裂变出的 5 个子邮箱会先打乱，再随机插入现有队列；实际注册时仍按文件顺序消费
+- `hotmail007.txt` 每行格式固定为：`alias_email----primary_email----password----client_id----mail_mode----refresh_token`
 - 开启裂变后，注册流程消费的是别名邮箱，验证码仍通过对应原始邮箱的微软 OAuth 凭据轮询获取
 - Hotmail007 模式注册成功后，除了写入 `tokens/accounts.txt`，还会额外写入 `tokens/emails.txt`
 - `tokens/emails.txt` 每行格式为 `原始邮箱----邮箱密码----client_id----refresh_token`
