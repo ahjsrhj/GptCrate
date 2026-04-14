@@ -15,7 +15,7 @@ from .microsoft_alias import expand_microsoft_alias_emails
 from .ui import rich_print as print
 
 _MAIL_ACCESS_RETRY_LIMIT = 3
-_HOTMAIL007_ALIAS_COUNT = 5
+_HOTMAIL007_ALIAS_COUNT = 6
 _HOTMAIL007_READY_THRESHOLD = 21
 _HOTMAIL007_LOW_WATERMARK = 5
 _HOTMAIL007_WAIT_INTERVAL = 1.0

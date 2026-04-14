@@ -551,7 +551,7 @@ def _compute_hotmail007_batch_target_stock(state: dict, queue_size: int) -> int:
         return _HOTMAIL007_START_THRESHOLD
     if queue_size > _HOTMAIL007_BATCH_LOW_WATER:
         return 0
-    return max(queue_size, min(outstanding, queue_size + 5))
+    return max(queue_size, min(outstanding, queue_size + hotmail._HOTMAIL007_ALIAS_COUNT))
 
 
 def _hotmail007_buyer_loop(

@@ -234,7 +234,7 @@ HOTMAIL007_API_URL=https://gapi.hotmail007.com
 HOTMAIL007_API_KEY=你的API密钥
 HOTMAIL007_MAIL_TYPE=outlook-premium
 HOTMAIL007_MAIL_MODE=imap
-# 是否开启邮箱裂变（true=购买 1 个原始邮箱后裂变成 5 个别名并依次使用）
+# 是否开启邮箱裂变（true=购买 1 个原始邮箱后裂变成 6 个别名并依次使用）
 HOTMAIL007_ALIAS_SPLIT_ENABLED=false
 # 裂变子邮箱库存队列文件
 HOTMAIL007_QUEUE_FILE=hotmail007.txt
@@ -251,7 +251,7 @@ OUTLOOK_PROXY=http://127.0.0.1:7890
 - 有限批量注册时，即使本次 `count` 小于 21，也会先暖池到 21；注册开始后只在低水位 `<= 5` 时按剩余待注册次数做增量补货，不会在启动前一次性补到 `count`
 - 如果注册线程临时把号池用空，会阻塞等待后台购买线程补货，不会回退成前台同步购买
 - 无限模式运行时，启动前同样先暖池到 21，运行中则持续维持 `hotmail007.txt` 中的可用子邮箱数量大于 20；低于等于 20 时后台会继续补货
-- 每次新购买并裂变出的 5 个子邮箱会先打乱，再随机插入现有队列；实际注册时仍按文件顺序消费
+- 每次新购买并裂变出的 6 个子邮箱会先打乱，再随机插入现有队列；实际注册时仍按文件顺序消费
 - `hotmail007.txt` 每行格式固定为：`alias_email----primary_email----password----client_id----mail_mode----refresh_token`
 - 开启裂变后，注册流程消费的是别名邮箱，验证码仍通过对应原始邮箱的微软 OAuth 凭据轮询获取
 - Hotmail007 模式注册成功后，除了写入 `tokens/accounts.txt`，还会额外写入 `tokens/emails.txt`

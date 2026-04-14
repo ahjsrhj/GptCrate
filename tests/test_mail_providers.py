@@ -228,6 +228,7 @@ class MailProviderTests(unittest.TestCase):
             "first+cccccc@example.com",
             "first+dddddd@example.com",
             "first+eeeeee@example.com",
+            "first+ffffff@example.com",
         ]
         second_aliases = [
             "second+fffffg@example.com",
@@ -235,6 +236,7 @@ class MailProviderTests(unittest.TestCase):
             "second+hhhhhi@example.com",
             "second+iiiiij@example.com",
             "second+jjjjjk@example.com",
+            "second+kkkkkl@example.com",
         ]
 
         with mock.patch.object(
@@ -250,14 +252,14 @@ class MailProviderTests(unittest.TestCase):
             mock.patch.object(
                 hotmail,
                 "_outlook_get_known_ids",
-                side_effect=[set() for _ in range(6)],
+                side_effect=[set() for _ in range(7)],
             ):
-            emails = [mail.get_email_and_token()[0] for _ in range(6)]
+            emails = [mail.get_email_and_token()[0] for _ in range(7)]
 
-        self.assertEqual(set(emails[:5]), set(first_aliases))
-        self.assertIn(emails[5], second_aliases)
+        self.assertEqual(set(emails[:6]), set(first_aliases))
+        self.assertIn(emails[6], second_aliases)
         self.assertEqual(get_mail_mock.call_count, 2)
-        self.assertEqual(len(ctx._hotmail007_queue), 4)
+        self.assertEqual(len(ctx._hotmail007_queue), 5)
 
     def test_hotmail007_alias_split_refreshes_known_ids_for_each_dequeued_alias(self):
         ctx.EMAIL_MODE = "hotmail007"
@@ -276,6 +278,7 @@ class MailProviderTests(unittest.TestCase):
             "primary+cccccc@example.com",
             "primary+dddddd@example.com",
             "primary+eeeeee@example.com",
+            "primary+ffffff@example.com",
         ]
 
         with mock.patch.object(hotmail, "hotmail007_get_mail", return_value=([fake_mail], "")) as get_mail_mock, \
@@ -477,6 +480,7 @@ class MailProviderTests(unittest.TestCase):
                 "primary+c@example.com",
                 "primary+d@example.com",
                 "primary+e@example.com",
+                "primary+f@example.com",
             ]
             observed = {}
 
@@ -498,7 +502,7 @@ class MailProviderTests(unittest.TestCase):
 
             self.assertEqual(observed["batch_count"], 6)
             self.assertGreaterEqual(len(observed["queue_lines"]), 21)
-            self.assertLess(len(observed["queue_lines"]), 26)
+            self.assertLess(len(observed["queue_lines"]), 27)
             self.assertEqual(get_mail_mock.call_count, 4)
             stats_thread.join.assert_called_once()
 
@@ -545,6 +549,7 @@ class MailProviderTests(unittest.TestCase):
                 "primary+c@example.com",
                 "primary+d@example.com",
                 "primary+e@example.com",
+                "primary+f@example.com",
             ]
             observed = {}
 
@@ -567,8 +572,7 @@ class MailProviderTests(unittest.TestCase):
             self.assertEqual(observed["batch_count"], 50)
             self.assertGreaterEqual(len(observed["queue_lines"]), 21)
             self.assertLess(len(observed["queue_lines"]), 50)
-            self.assertGreaterEqual(get_mail_mock.call_count, 5)
-            self.assertLessEqual(get_mail_mock.call_count, 6)
+            self.assertEqual(get_mail_mock.call_count, 4)
             stats_thread.join.assert_called_once()
 
     def test_hotmail007_loop_mode_prefills_queue_above_twenty(self):
@@ -622,6 +626,7 @@ class MailProviderTests(unittest.TestCase):
                 "loop-primary+c@example.com",
                 "loop-primary+d@example.com",
                 "loop-primary+e@example.com",
+                "loop-primary+f@example.com",
             ]
             observed = {}
 
