@@ -1058,6 +1058,44 @@ class MailProviderTests(unittest.TestCase):
         self.assertEqual(ctx._hotmail007_credentials["imap@example.com"]["mail_mode"], "imap")
         imap_mock.assert_called()
 
+    def test_local_outlook_imap_alias_uses_primary_mailbox_email_for_fetch(self):
+        ctx.EMAIL_MODE = "local_outlook"
+        ctx.LOCAL_OUTLOOK_MAIL_MODE = "imap"
+        alias_email = "WallaceHarold6686+dnrzpz@hotmail.com"
+        primary_email = "WallaceHarold6686@hotmail.com"
+
+        class FakeQueue:
+            def __len__(self):
+                return 0
+
+            def pop(self):
+                return {
+                    "email": alias_email,
+                    "password": "imap-pass",
+                    "client_id": "imap-client",
+                    "refresh_token": "imap-refresh",
+                }
+
+        ctx._email_queue = FakeQueue()
+
+        with mock.patch.object(hotmail, "_outlook_get_imap_token", return_value=("token", "outlook.office365.com")) as imap_mock, \
+             mock.patch.object(hotmail, "_outlook_get_known_ids", return_value=set()):
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), (alias_email, alias_email))
+        self.assertEqual(
+            ctx._hotmail007_credentials[alias_email]["imap_mailbox_email"],
+            primary_email,
+        )
+        self.assertEqual(imap_mock.call_args.kwargs["email_addr"], primary_email)
+
+        with mock.patch.object(hotmail, "_outlook_fetch_otp", return_value="654321") as fetch_mock:
+            code = hotmail.get_oai_code(alias_email)
+
+        self.assertEqual(code, "654321")
+        self.assertEqual(fetch_mock.call_args.args[0], primary_email)
+        self.assertEqual(fetch_mock.call_args.kwargs["error_email"], alias_email)
+
     def test_local_outlook_mail_error_records_bad_account(self):
         import os
         import tempfile

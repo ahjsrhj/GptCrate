@@ -31,6 +31,7 @@ auths/
 # Accounts
 account.txt
 accounts.txt
+accounts.txt*
 bad_local_outlook.txt
 proxies.txt
 hotmail007.txt

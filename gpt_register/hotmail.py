@@ -11,7 +11,7 @@ from curl_cffi import requests
 
 from . import context as ctx
 from .cf_mail import extract_otp_code
-from .microsoft_alias import expand_microsoft_alias_emails
+from .microsoft_alias import expand_microsoft_alias_emails, normalize_microsoft_alias_base_email
 from .ui import rich_print as print
 
 _MAIL_ACCESS_RETRY_LIMIT = 3
@@ -25,6 +25,19 @@ _HOTMAIL007_QUEUE_LOCK = threading.Lock()
 def _resolve_outlook_mail_mode(preferred: str | None = None) -> str:
     mode = (preferred or "graph").strip().lower()
     return mode if mode in {"graph", "imap"} else "graph"
+
+
+def _resolve_local_outlook_imap_mailbox_email(email_addr: str, mail_mode: str | None = None) -> str:
+    resolved_email = str(email_addr or "").strip()
+    if _resolve_outlook_mail_mode(mail_mode) != "imap" or "@" not in resolved_email:
+        return resolved_email
+    local = resolved_email.split("@", 1)[0]
+    if "+" not in local:
+        return resolved_email
+    try:
+        return normalize_microsoft_alias_base_email(resolved_email)
+    except ValueError:
+        return resolved_email
 
 
 def _is_timeout_error(error: Any) -> bool:
@@ -1176,10 +1189,16 @@ def get_local_email_and_token(proxies: Any = None) -> tuple:
             print("[Error] 本地 Outlook 账号已用完")
             return "", ""
         email = account["email"]
+        imap_mailbox_email = _resolve_local_outlook_imap_mailbox_email(email, mode)
         print(f"[*] 从本地账号文件读取 Outlook 账号: {email} (剩余: {len(ctx._email_queue)})")
         try:
             if mode == "imap":
-                _outlook_get_imap_token(account["client_id"], account["refresh_token"], proxies, email_addr=email)
+                _outlook_get_imap_token(
+                    account["client_id"],
+                    account["refresh_token"],
+                    proxies,
+                    email_addr=imap_mailbox_email,
+                )
             else:
                 _outlook_get_graph_token(account["client_id"], account["refresh_token"], proxies)
         except Exception as exc:
@@ -1197,6 +1216,7 @@ def get_local_email_and_token(proxies: Any = None) -> tuple:
             "refresh_token": account["refresh_token"],
             "ms_password": account.get("password", ""),
             "primary_email": email,
+            "imap_mailbox_email": imap_mailbox_email,
             "mail_mode": mode,
             "source": "local_outlook",
             "account_line": _local_outlook_account_to_line(account),
@@ -1214,6 +1234,11 @@ def get_oai_code(email: str, proxies: Any = None) -> str:
         print(f"[Error] 未找到 {email} 的 Hotmail007 凭据")
         return ""
     mailbox_email = str(creds.get("primary_email") or email).strip() or email
+    if (
+        str(creds.get("source") or "").strip() == "local_outlook"
+        and _resolve_outlook_mail_mode(creds.get("mail_mode")) == "imap"
+    ):
+        mailbox_email = str(creds.get("imap_mailbox_email") or mailbox_email).strip() or mailbox_email
     code = _outlook_fetch_otp(
         mailbox_email,
         creds["client_id"],
